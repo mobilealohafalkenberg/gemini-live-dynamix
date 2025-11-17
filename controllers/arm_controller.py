@@ -4,6 +4,8 @@
 Arm Controller API for Mobile ALOHA
 Provides flexible arm control with automatic format detection and conversion
 Designed for integration with Gemini Live API
+
+REFACTORED: Now uses DynamixelController + Modern Robotics IK (No ROS2)
 """
 
 import time
@@ -14,19 +16,22 @@ from enum import Enum
 from typing import Dict, List, Optional, Tuple, Union
 import numpy as np
 import logging
+from pathlib import Path
+import sys
 
-from aloha.robot_utils import move_arms, torque_on
-from aloha.constants import START_ARM_POSE
-from interbotix_common_modules.common_robot.robot import (
-    create_interbotix_global_node,
-    robot_shutdown,
-    robot_startup,
-)
-from interbotix_xs_modules.xs_robot.arm import InterbotixManipulatorXS
+# Add parent directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+# Direct Dynamixel control (replaces ROS2)
+from dynamixel_controller import DynamixelController
+from models.vx300s_model import VX300S
+
+# Modern Robotics for IK/FK
+import modern_robotics as mr
 
 # Import safety validator
 try:
-    from safety_validator import SafetyValidator, RiskLevel
+    from controllers.safety_validator import SafetyValidator, RiskLevel
     SAFETY_ENABLED = True
 except ImportError:
     print("[ArmController] Warning: Safety validator not available")
@@ -109,28 +114,25 @@ class ArmController:
         'dangerous_wrist_rotation_threshold': math.radians(90),  # Wrist rotation in dangerous combo
     }
     
-    def __init__(self, robot_model='vx300s', robot_name='follower_left', node=None, bot=None,
+    def __init__(self, dynamixel_controller: Optional[DynamixelController] = None,
+                 robot_model: Optional[VX300S] = None,
                  enable_safety=True, dry_run=False):
         """Initialize controller (does not connect to robot yet)
-        
+
         Args:
-            robot_model: Robot model name
-            robot_name: Robot instance name
-            node: Optional ROS node to share
-            bot: Optional bot instance to share
+            dynamixel_controller: Shared DynamixelController instance
+            robot_model: VX300S kinematics model (created if not provided)
             enable_safety: Enable safety validation
             dry_run: If True, validate but don't execute movements
         """
-        self.robot_model = robot_model
-        self.robot_name = robot_name
-        self.bot = bot  # Can share existing bot
-        self.node = node  # Can share existing node
+        self.dxl = dynamixel_controller  # Shared DynamixelController
+        self.model = robot_model or VX300S()  # Kinematics model
         self.initialized = False
         self.current_state = ArmState.UNKNOWN
         self.current_joints = [0.0] * 6
         self.current_ee_pose = None
         self.state_lock = threading.Lock()
-        self.monitor_failure_count = 0 #tracks how many times the monitor has failed consecutively.
+        self.monitor_failure_count = 0  # Tracks how many times the monitor has failed consecutively
         self.dry_run = dry_run
 
         # Movement parameters
@@ -141,7 +143,7 @@ class ArmController:
         self.active_trajectories = {}  # trajectory_id -> trajectory info
         self.trajectory_lock = threading.Lock()
         self.cancel_flags = {}  # trajectory_id -> threading.Event for cancellation
-        
+
         # Initialize safety validator
         self.safety_enabled = enable_safety and SAFETY_ENABLED
         if self.safety_enabled:
@@ -158,50 +160,49 @@ class ArmController:
         Returns True if successful, False otherwise.
         """
         try:
-            print("[ArmController] Initializing robot connection...")
-            
-            # If bot not provided, create new one
-            if self.bot is None:
-                # Create ROS node if not provided
-                if self.node is None:
-                    self.node = create_interbotix_global_node('arm_controller')
-                
-                # Create robot interface
-                self.bot = InterbotixManipulatorXS(
-                    robot_model=self.robot_model,
-                    robot_name=self.robot_name,
-                    node=self.node,
-                    iterative_update_fk=True,  # Keep FK updated
-                    moving_time=self.default_moving_time,
-                    accel_time=self.default_accel_time,
-                )
-                
-                # Start ROS
-                robot_startup(self.node)
-            else:
-                print("[ArmController] Using existing robot interface")
-            
-            # Configure motors
-            print("[ArmController] Configuring motors...")
-            self.bot.core.robot_set_operating_modes('group', 'arm', 'position')
-            
-            # Enable torque
-            torque_on(self.bot)
-            
+            print("[ArmController] Initializing arm controller...")
+
+            # Verify DynamixelController is provided and initialized
+            if self.dxl is None:
+                print("[ArmController] ✗ No DynamixelController provided")
+                return False
+
+            # Verify DynamixelController is connected
+            if not self.dxl.port_handler or not self.dxl.port_handler.is_open:
+                print("[ArmController] ✗ DynamixelController not connected")
+                return False
+
+            # Enable torque on arm motors
+            print("[ArmController] Enabling torque on arm motors...")
+            arm_motor_ids = [1, 2, 4, 6, 7, 8]  # Skip shadow motors 3, 5 and gripper 9
+            self.dxl.enable_torque(arm_motor_ids)
+
+            # Read current position
+            print("[ArmController] Reading current position...")
+            current_joints = self.dxl.get_joint_positions_radians()
+            if current_joints is None:
+                print("[ArmController] ✗ Failed to read joint positions")
+                return False
+
+            with self.state_lock:
+                self.current_joints = list(current_joints)
+
             # Move to ready position
             print("[ArmController] Moving to ready position...")
             self.move_to_pose('ready', blocking=True)
-            
+
             self.initialized = True
-            
+
             # Start position monitoring thread
             self._start_position_monitor()
-            
+
             print("[ArmController] ✓ Initialization complete")
             return True
-            
+
         except Exception as e:
             print(f"[ArmController] ✗ Initialization failed: {e}")
+            import traceback
+            traceback.print_exc()
             return False
     
     def _start_position_monitor(self):
@@ -209,32 +210,34 @@ class ArmController:
         def monitor():
             while self.initialized:
                 try:
-                    # Get current joint positions
-                    with self.bot.core.js_mutex:
-                        joints = list(self.bot.arm.get_joint_commands())
+                    # Get current joint positions from DynamixelController
+                    joints = self.dxl.get_joint_positions_radians()
 
-                    # Get end effector pose
-                    ee_pose = self.bot.arm.get_ee_pose()
+                    if joints is not None:
+                        # Compute forward kinematics to get end effector pose
+                        ee_pose = mr.FKinSpace(self.model.M, self.model.Slist, joints)
 
-                    # Update shared state with lock protection
-                    with self.state_lock:
-                        self.current_joints = joints
-                        self.current_ee_pose = ee_pose
+                        # Update shared state with lock protection
+                        with self.state_lock:
+                            self.current_joints = list(joints)
+                            self.current_ee_pose = ee_pose
 
-                    # Reset failure counter on success
-                    self.monitor_failure_count = 0
+                        # Reset failure counter on success
+                        self.monitor_failure_count = 0
+                    else:
+                        self.monitor_failure_count += 1
 
                 except Exception as e:
                     self.monitor_failure_count += 1
                     logging.error(
-                       f"Position monitor failed (failure #{self.monitor_failure_count}): {type(e).__name__}: {e}",
-                       exc_info=True
+                        f"Position monitor failed (failure #{self.monitor_failure_count}): {type(e).__name__}: {e}",
+                        exc_info=True
                     )
                     # Alert if failures are excessive
                     if self.monitor_failure_count >= 5:
                         logging.critical(
                             f"Position monitor has failed {self.monitor_failure_count} consecutive times! "
-                           "This may indicate a serious hardware or connection issue."
+                            "This may indicate a serious hardware or connection issue."
                         )
 
                 time.sleep(0.1)  # Check 10 times per second
@@ -242,14 +245,39 @@ class ArmController:
         monitor_thread = threading.Thread(target=monitor, daemon=True)
         monitor_thread.start()
     
+    def _build_transformation_matrix(self, position: Dict[str, float], orientation: List[float]) -> np.ndarray:
+        """
+        Build SE(3) transformation matrix from position and orientation.
+
+        Args:
+            position: Dict with x, y, z in meters
+            orientation: List of [roll, pitch, yaw] in radians
+
+        Returns:
+            4x4 homogeneous transformation matrix
+        """
+        roll, pitch, yaw = orientation
+
+        # Build rotation matrix from RPY (Z-Y-X convention)
+        R = mr.MatrixExp3(mr.VecToso3([0, 0, yaw])) @ \
+            mr.MatrixExp3(mr.VecToso3([0, pitch, 0])) @ \
+            mr.MatrixExp3(mr.VecToso3([roll, 0, 0]))
+
+        # Build transformation matrix
+        T = np.eye(4)
+        T[:3, :3] = R
+        T[:3, 3] = [position['x'], position['y'], position['z']]
+
+        return T
+
     def check_safety_constraints(self, joint_positions: List[float], ee_position: Optional[Dict] = None) -> Tuple[bool, str]:
         """
         Check if joint positions are safe (no self-collision risk).
-        
+
         Args:
             joint_positions: List of 6 joint angles in radians
             ee_position: Optional end effector position dict with x, y, z
-            
+
         Returns:
             (is_safe, warning_message)
         """
@@ -507,23 +535,17 @@ class ArmController:
 
             print(f"[ArmController] Moving to joints: {[f'{a:.3f}' for a in angles_rad]}")
 
-            # Use InterbotixArmXSInterface method
-            success = self.bot.arm.set_joint_positions(
-                angles_rad,
-                moving_time=moving_time or self.default_moving_time,
-                accel_time=self.default_accel_time,
-                blocking=blocking
-            )
-            
-            if success:
-                with self.state_lock:
-                    self.current_state = ArmState.AT_TARGET
-                    self.current_joints = angles_rad
-            else:
-                with self.state_lock:
-                    self.current_state = ArmState.ERROR
-                return {"success": False, "error": "Joint limits exceeded", "state": "error"}
-            
+            # Use DynamixelController to set joint positions
+            self.dxl.set_joint_positions_radians(np.array(angles_rad))
+
+            # If blocking, wait for movement to complete
+            if blocking:
+                time.sleep(moving_time or self.default_moving_time)
+
+            with self.state_lock:
+                self.current_state = ArmState.AT_TARGET
+                self.current_joints = angles_rad
+
             return self.get_arm_state()
             
         except Exception as e:
@@ -597,64 +619,61 @@ class ArmController:
             
             with self.state_lock:
                 self.current_state = ArmState.MOVING
-            
+
             print(f"[ArmController] Moving to position: x={pos['x']:.3f}, y={pos['y']:.3f}, z={pos['z']:.3f}")
-            
-            # Use InterbotixArmXSInterface method to get IK solution (without executing)
-            joint_positions, success = self.bot.arm.set_ee_pose_components(
-                x=pos['x'],
-                y=pos['y'],
-                z=pos['z'],
-                roll=orientation[0],
-                pitch=orientation[1],
-                yaw=orientation[2] if len(orientation) > 2 else None,
-                execute=False,  # Just get IK solution, don't move yet
-                moving_time=moving_time or self.default_moving_time,
-                accel_time=self.default_accel_time,
-                blocking=blocking
-            )
-            
-            if success:
-                # Convert tuple to list and extract first 6 joints
-                if isinstance(joint_positions, tuple):
-                    joint_positions = list(joint_positions)
-                joint_list = joint_positions[:6] if len(joint_positions) >= 6 else joint_positions
-                
-                print(f"[ArmController] IK solution: joints={[f'{math.degrees(j):.1f}°' for j in joint_list]}")
-                
-                # Safety check the IK solution before executing
-                is_safe, warning = self.check_safety_constraints(joint_list, ee_position=pos)
-                if not is_safe:
-                    print(f"[ArmController] ⚠️ SAFETY BLOCKED: {warning}")
-                    with self.state_lock:
-                        self.current_state = ArmState.ERROR
-                    return {"success": False, "error": f"Safety: {warning}", "state": "error"}
-                
-                print(f"[ArmController] Safety check passed, executing movement")
-                
-                # Now execute the safe movement
-                joint_positions, success = self.bot.arm.set_ee_pose_components(
-                    x=pos['x'],
-                    y=pos['y'],
-                    z=pos['z'],
-                    roll=orientation[0],
-                    pitch=orientation[1],
-                    yaw=orientation[2] if len(orientation) > 2 else None,
-                    execute=True,  # Execute the movement
-                    moving_time=moving_time or self.default_moving_time,
-                    accel_time=self.default_accel_time,
-                    blocking=blocking
-                )
-                
+
+            # Build SE(3) transformation matrix for target pose
+            T_target = self._build_transformation_matrix(pos, orientation)
+
+            # Get current joint positions for IK initial guess
+            current_joints = self.dxl.get_joint_positions_radians()
+            if current_joints is None:
                 with self.state_lock:
-                    self.current_state = ArmState.AT_TARGET
-                    if joint_positions is not None:
-                        self.current_joints = list(joint_positions) if isinstance(joint_positions, tuple) else joint_positions
-            else:
+                    self.current_state = ArmState.ERROR
+                return {"success": False, "error": "Failed to read current position", "state": "error"}
+
+            # Run IK using Modern Robotics
+            print(f"[ArmController] Computing IK solution...")
+            joint_solution, success = mr.IKinSpace(
+                self.model.Slist,
+                self.model.M,
+                T_target,
+                current_joints,
+                eomg=0.01,  # Angular error tolerance
+                ev=0.001    # Linear error tolerance
+            )
+
+            if not success:
                 with self.state_lock:
                     self.current_state = ArmState.ERROR
                 return {"success": False, "error": "IK solution not found", "state": "error"}
-            
+
+            # Convert to list
+            joint_list = list(joint_solution)
+
+            print(f"[ArmController] IK solution: joints={[f'{math.degrees(j):.1f}°' for j in joint_list]}")
+
+            # Safety check the IK solution before executing
+            is_safe, warning = self.check_safety_constraints(joint_list, ee_position=pos)
+            if not is_safe:
+                print(f"[ArmController] ⚠️ SAFETY BLOCKED: {warning}")
+                with self.state_lock:
+                    self.current_state = ArmState.ERROR
+                return {"success": False, "error": f"Safety: {warning}", "state": "error"}
+
+            print(f"[ArmController] Safety check passed, executing movement")
+
+            # Execute the safe movement
+            self.dxl.set_joint_positions_radians(np.array(joint_list))
+
+            # If blocking, wait for movement to complete
+            if blocking:
+                time.sleep(moving_time or self.default_moving_time)
+
+            with self.state_lock:
+                self.current_state = ArmState.AT_TARGET
+                self.current_joints = joint_list
+
             return self.get_arm_state()
             
         except Exception as e:
@@ -1216,9 +1235,6 @@ class ArmController:
         if accel_time is not None:
             self.default_accel_time = accel_time
 
-        if self.initialized:
-            self.bot.arm.set_trajectory_time(moving_time, accel_time)
-
         print(f"[ArmController] Speed set: moving_time={moving_time}s, accel_time={self.default_accel_time}s")
     
     def emergency_stop(self) -> Dict:
@@ -1239,7 +1255,9 @@ class ArmController:
 
         try:
             print("[ArmController] ⚠️ EMERGENCY STOP ACTIVATED!")
-            self.bot.core.robot_torque_enable('group', 'arm', False)
+            # Disable torque on arm motors
+            arm_motor_ids = [1, 2, 4, 6, 7, 8]
+            self.dxl.disable_torque(arm_motor_ids)
             with self.state_lock:
                 self.current_state = ArmState.ERROR
             print("[ArmController] System in ERROR state. Call resume_after_stop() to recover.")
@@ -1278,43 +1296,45 @@ class ArmController:
 
             # Re-enable torque
             print("[ArmController] Re-enabling motor torque")
-            torque_on(self.bot)
+            arm_motor_ids = [1, 2, 4, 6, 7, 8]
+            self.dxl.enable_torque(arm_motor_ids)
 
-            # Capture and validate current position
-            print("[ArmController] Capturing current position")
-            self.bot.arm.capture_joint_positions()
+            # Read and validate current position
+            print("[ArmController] Reading current position")
+            current_joints = self.dxl.get_joint_positions_radians()
+            if current_joints is None:
+                print("[ArmController] ✗ Failed to read current position")
+                return {"success": False, "error": "Failed to read current position", "state": "error"}
 
-            # Get current joint positions for validation
-            with self.bot.core.js_mutex:
-                current_joints = list(self.bot.arm.get_joint_commands())
+            current_joints_list = list(current_joints)
 
             # Validate current position is safe
-            is_safe, warning = self.check_safety_constraints(current_joints)
+            is_safe, warning = self.check_safety_constraints(current_joints_list)
             if not is_safe:
                 print(f"[ArmController] ⚠️ WARNING: Current position unsafe after resume: {warning}")
                 print("[ArmController] Recommend moving to 'home' or 'ready' pose")
                 # Still allow resume but warn user
                 with self.state_lock:
                     self.current_state = ArmState.IDLE
-                    self.current_joints = current_joints
+                    self.current_joints = current_joints_list
                 return {
                     "success": True,
                     "state": "resumed_with_warnings",
                     "warning": warning,
-                    "current_joints": current_joints,
+                    "current_joints": current_joints_list,
                     "recommendation": "Move to a safe pose ('home' or 'ready') before other operations"
                 }
 
             # All validations passed
             with self.state_lock:
                 self.current_state = ArmState.IDLE
-                self.current_joints = current_joints
+                self.current_joints = current_joints_list
 
             print("[ArmController] ✓ System resumed successfully")
             return {
                 "success": True,
                 "state": "resumed",
-                "current_joints": current_joints,
+                "current_joints": current_joints_list,
                 "message": "System recovered from ERROR state"
             }
 
@@ -1327,10 +1347,10 @@ class ArmController:
         """Shutdown robot connection and cleanup."""
         print("[ArmController] Shutting down...")
         self.initialized = False
-        
-        if self.node:
-            robot_shutdown(self.node)
-        
+
+        # Note: DynamixelController is shared, so we don't close it here
+        # The bridge that created it will handle cleanup
+
         print("[ArmController] ✓ Shutdown complete")
     
     def __del__(self):
