@@ -1,0 +1,4 @@
+google-genai
+aiohttp
+aiohttp-cors
+python-dotenv
