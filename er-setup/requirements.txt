@@ -2,3 +2,8 @@ google-genai
 aiohttp
 aiohttp-cors
 python-dotenv
+dynamixel-sdk
+modern-robotics
+pyrealsense2
+numpy
+pyyaml

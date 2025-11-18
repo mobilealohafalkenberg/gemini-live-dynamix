@@ -18,14 +18,25 @@ Documentation: https://ai.google.dev/gemini-api/docs/robotics-overview
 """
 
 import os
+import sys
 import json
 import time
 import base64
 import uuid
+import asyncio
 from pathlib import Path
 from aiohttp import web
 from aiohttp_cors import setup, ResourceOptions
 from dotenv import load_dotenv
+
+# Add parent directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from dynamixel_controller import DynamixelController
+from models.vx300s_model import VX300S
+from controllers.arm_controller import ArmController
+from controllers.gripper_controller import GripperController
+from controllers.camera_controller import CameraController
 
 # Load .env file from project root
 env_path = Path(__file__).parent.parent / '.env'
@@ -34,6 +45,286 @@ load_dotenv(dotenv_path=env_path)
 # In-memory conversation storage
 # Key: conversation_id, Value: {history, client, task, step, created_at}
 conversations = {}
+
+# Global controller instances (shared across all requests)
+dynamixel_controller = None
+arm_controller = None
+gripper_controller = None
+camera_controller = None
+robot_model = None
+
+
+def initialize_robot(port: str = '/dev/ttyDXL', baudrate: int = 1000000) -> bool:
+    """
+    Initialize robot controllers and hardware.
+
+    Args:
+        port: Serial port for Dynamixel communication
+        baudrate: Communication baudrate (default 1Mbps)
+
+    Returns:
+        True if initialization successful
+    """
+    global dynamixel_controller, arm_controller, gripper_controller, camera_controller, robot_model
+
+    try:
+        print("\n" + "=" * 60)
+        print("[ER Bridge] Initializing Robot Hardware")
+        print("=" * 60)
+
+        # Get config path
+        config_path = Path(__file__).parent.parent / 'config' / 'vx300s.yaml'
+
+        # Initialize robot model (kinematics)
+        print("\n[1/5] Loading robot model...")
+        robot_model = VX300S()
+        print(f"  ✓ VX300S model loaded (6-DOF, {robot_model.max_reach}m reach)")
+
+        # Initialize Dynamixel controller
+        print(f"\n[2/5] Connecting to Dynamixel bus at {port}...")
+        dynamixel_controller = DynamixelController(
+            port=port,
+            baudrate=baudrate,
+            config_file=str(config_path)
+        )
+
+        if not dynamixel_controller.initialize_motors():
+            raise Exception("Failed to initialize Dynamixel motors")
+
+        # Enable torque
+        dynamixel_controller.enable_torque()
+
+        # Start position monitoring
+        dynamixel_controller.start_monitoring(frequency=10)
+        print(f"  ✓ Dynamixel controller connected, torque enabled, monitoring at 10Hz")
+
+        # Initialize arm controller
+        print("\n[3/5] Initializing arm controller...")
+        arm_controller = ArmController(
+            dynamixel_controller=dynamixel_controller,
+            robot_model=robot_model,
+            enable_safety=True,
+            dry_run=False
+        )
+        arm_controller.initialize()
+        print(f"  ✓ Arm controller ready with IK/FK and safety checks")
+
+        # Initialize gripper controller
+        print("\n[4/5] Initializing gripper controller...")
+        gripper_controller = GripperController(
+            dynamixel_controller=dynamixel_controller,
+            dry_run=False
+        )
+        gripper_controller.initialize()
+        print(f"  ✓ Gripper controller ready (current limited to 300mA)")
+
+        # Initialize camera controller
+        print("\n[5/5] Initializing camera controller...")
+        camera_controller = CameraController()
+        camera_controller.initialize()
+        print(f"  ✓ Camera controller ready (gripper_cam + top_cam)")
+
+        print("\n" + "=" * 60)
+        print("[ER Bridge] ✓ Robot initialization complete!")
+        print("=" * 60 + "\n")
+
+        return True
+
+    except Exception as e:
+        print(f"\n[ER Bridge] ✗ Robot initialization failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def shutdown_robot():
+    """Safely shutdown robot controllers."""
+    global dynamixel_controller, camera_controller
+
+    print("\n[ER Bridge] Shutting down robot...")
+
+    try:
+        if camera_controller:
+            camera_controller.shutdown()
+            print("  ✓ Camera controller shutdown")
+    except Exception as e:
+        print(f"  ✗ Camera shutdown error: {e}")
+
+    try:
+        if dynamixel_controller:
+            dynamixel_controller.disable_torque()
+            dynamixel_controller.close()
+            print("  ✓ Dynamixel controller shutdown")
+    except Exception as e:
+        print(f"  ✗ Dynamixel shutdown error: {e}")
+
+    print("[ER Bridge] Shutdown complete\n")
+
+
+async def execute_robot_function(next_action: dict) -> dict:
+    """
+    Execute a robot function from Gemini's response.
+
+    Args:
+        next_action: Dict with 'function' and 'args' keys
+
+    Returns:
+        Execution result dict with success, function, args, and result data
+    """
+    if not next_action:
+        return {'success': False, 'error': 'No action provided'}
+
+    function_name = next_action.get('function')
+    args = next_action.get('args', {})
+
+    result = {
+        'success': False,
+        'function': function_name,
+        'args': args
+    }
+
+    try:
+        if function_name == 'move_arm':
+            position = args.get('position')
+            pose = args.get('pose')
+            moving_time = args.get('moving_time', 1.5)
+
+            if pose:
+                # Move to named pose
+                success = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: arm_controller.move_to_pose(pose, moving_time=moving_time, blocking=True)
+                )
+                result['success'] = success
+                result['message'] = f"Moved to pose '{pose}'"
+            elif position:
+                # Move to Cartesian position
+                x, y, z = position
+                success = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: arm_controller.move_to_position(x, y, z, moving_time=moving_time, blocking=True)
+                )
+                result['success'] = success
+                result['new_position'] = position
+                result['message'] = f"Moved to position [{x:.3f}, {y:.3f}, {z:.3f}]"
+            else:
+                result['error'] = 'move_arm requires either position or pose argument'
+
+        elif function_name == 'control_gripper':
+            action = args.get('action')
+
+            if action == 'open':
+                success = await asyncio.get_event_loop().run_in_executor(
+                    None, gripper_controller.open_gripper
+                )
+                result['success'] = success
+                result['gripper_state'] = 'open'
+                result['message'] = 'Gripper opened'
+            elif action == 'close':
+                success = await asyncio.get_event_loop().run_in_executor(
+                    None, gripper_controller.close_gripper
+                )
+                result['success'] = success
+                result['gripper_state'] = 'closed'
+                result['message'] = 'Gripper closed'
+            else:
+                result['error'] = f'Invalid gripper action: {action}'
+
+        elif function_name == 'get_arm_status':
+            state = await asyncio.get_event_loop().run_in_executor(
+                None, arm_controller.get_arm_state
+            )
+            result['success'] = True
+            result['arm_state'] = state
+            result['message'] = 'Arm status retrieved'
+
+        elif function_name == 'get_gripper_status':
+            state = await asyncio.get_event_loop().run_in_executor(
+                None, gripper_controller.get_gripper_state
+            )
+            result['success'] = True
+            result['gripper_state'] = state
+            result['message'] = 'Gripper status retrieved'
+
+        elif function_name == 'capture_camera_frame':
+            # Camera frames are captured automatically after each action
+            result['success'] = True
+            result['message'] = f"Camera frames captured ({args.get('reason', 'unknown')})"
+
+        else:
+            result['error'] = f'Unknown function: {function_name}'
+
+    except Exception as e:
+        result['error'] = str(e)
+        print(f"[ER Bridge] Function execution error: {e}")
+        import traceback
+        traceback.print_exc()
+
+    return result
+
+
+def capture_camera_images() -> list:
+    """
+    Capture images from both cameras.
+
+    Returns:
+        List of two base64-encoded JPEG images [gripper_cam, top_cam]
+    """
+    images = []
+
+    try:
+        # Capture gripper camera (first)
+        gripper_img = camera_controller.get_frame('gripper_cam')
+        images.append(gripper_img if gripper_img else '')
+
+        # Capture top/overhead camera (second)
+        top_img = camera_controller.get_frame('top_cam')
+        images.append(top_img if top_img else '')
+
+        print(f"[ER Bridge] Captured camera images: gripper={len(gripper_img) if gripper_img else 0}B, top={len(top_img) if top_img else 0}B")
+
+    except Exception as e:
+        print(f"[ER Bridge] Camera capture error: {e}")
+        images = ['', '']
+
+    return images
+
+
+def get_current_robot_state() -> dict:
+    """
+    Get current robot state for context.
+
+    Returns:
+        Dict with joints, end_effector_position, gripper_position
+    """
+    state = {
+        'joints': [],
+        'end_effector_position': {'x': 0, 'y': 0, 'z': 0},
+        'gripper_position': 0
+    }
+
+    try:
+        # Get arm state
+        arm_state = arm_controller.get_arm_state()
+        if arm_state:
+            state['joints'] = list(arm_state.get('joint_angles', []))
+            ee_pos = arm_state.get('end_effector_position', {})
+            state['end_effector_position'] = {
+                'x': ee_pos.get('x', 0),
+                'y': ee_pos.get('y', 0),
+                'z': ee_pos.get('z', 0)
+            }
+
+        # Get gripper state
+        gripper_state = gripper_controller.get_gripper_state()
+        if gripper_state:
+            state['gripper_position'] = gripper_state.get('position', 0)
+
+    except Exception as e:
+        print(f"[ER Bridge] Error getting robot state: {e}")
+
+    return state
+
 
 try:
     from google import genai
@@ -101,30 +392,17 @@ async def handle_initial(data: dict, request_start_time: float) -> web.Response:
             'error': 'Missing or invalid "prompt" field (must be non-empty string)'
         }, status=400)
 
-    images = data.get('images', [])
-    if not isinstance(images, list):
-        return web.json_response({
-            'success': False,
-            'error': 'Invalid "images" field (must be array)'
-        }, status=400)
-
-    # Validate expected camera count
-    if len(images) != 2:
-        print(f"⚠️  WARNING: Expected 2 images (gripper_cam, top_cam), got {len(images)}")
-        print(f"    Camera order MUST be: [gripper_cam, top_cam]")
-
-    context = data.get('context', {})
-    if not isinstance(context, dict):
-        return web.json_response({
-            'success': False,
-            'error': 'Invalid "context" field (must be object)'
-        }, status=400)
-
     print(f"\n{'=' * 60}")
     print(f"[Simple ER Bridge] NEW TASK")
     print(f"{'=' * 60}")
     print(f"Prompt: {prompt}")
-    print(f"Images: {len(images)} frames (expected: [gripper_cam, top_cam])")
+
+    # Capture camera images automatically
+    images = capture_camera_images()
+    print(f"Images: {len(images)} frames captured (gripper_cam, top_cam)")
+
+    # Get current robot state automatically
+    current_state = get_current_robot_state()
 
     api_key = os.getenv('GEMINI_API_KEY')
     if not api_key:
@@ -139,28 +417,35 @@ async def handle_initial(data: dict, request_start_time: float) -> web.Response:
     # Create conversation ID
     conversation_id = str(uuid.uuid4())
 
-    # Extract robot specs from context
-    robot_specs = context.get('robot_specs', {})
-    current_state = context.get('current_state', {})
-    workspace_bounds = context.get('workspace_bounds', {})
-    robot_base = context.get('robot_base_position', [])
+    # Build robot specs from actual robot model
+    joint_limits_deg = {
+        'waist': '[-180°, 180°]',
+        'shoulder': '[-108°, 114°]',
+        'elbow': '[-123°, 92°]',
+        'forearm_roll': '[-180°, 180°]',
+        'wrist_angle': '[-100°, 123°]',
+        'wrist_rotate': '[-180°, 180°]'
+    }
 
-    # Extract joint limits (convert to degrees for readability)
-    joint_limits = robot_specs.get('joint_limits', {})
-    joint_limits_deg = {}
-    for joint_name, limits in joint_limits.items():
-        if isinstance(limits, dict):
-            min_rad = limits.get('min', 0)
-            max_rad = limits.get('max', 0)
-            joint_limits_deg[joint_name] = f"[{min_rad * 57.2958:.0f}°, {max_rad * 57.2958:.0f}°]"
+    link_lengths = {
+        'base_height': 0.08915,
+        'shoulder_offset': 0.050,
+        'upper_arm': 0.200,
+        'elbow_offset': 0.050,
+        'forearm': 0.200,
+        'wrist_to_gripper': 0.065,
+        'gripper_fingers': 0.025
+    }
 
-    # Extract link lengths
-    link_lengths = robot_specs.get('link_lengths', {})
+    workspace_bounds = robot_model.workspace_limits if robot_model else {
+        'x': [0.1, 0.6],
+        'y': [-0.3, 0.3],
+        'z': [0.05, 0.55]
+    }
 
-    # Extract gripper specs
-    gripper = robot_specs.get('gripper', {})
+    robot_base = [0, 0, 0]
 
-    # Get current joint angles (in radians from frontend)
+    # Get current joint angles (in radians from actual robot)
     current_joints = current_state.get('joints', [])
     current_joints_deg = [f"{j * 57.2958:.1f}°" for j in current_joints] if current_joints else []
 
@@ -170,45 +455,43 @@ async def handle_initial(data: dict, request_start_time: float) -> web.Response:
 
     # Get gripper state
     gripper_pos = current_state.get('gripper_position', 0)
-    gripper_state = "open" if gripper_pos > 0.025 else "closed"
+    gripper_state_str = "open" if gripper_pos > 0.025 else "closed"
 
     # Build initial context prompt
     context_prompt = f"""NEW TASK: {prompt}
 
 ═══════════════════════════════════════════════════════════
-ROBOT SPECIFICATIONS - {robot_specs.get('model', 'ViperX 300s')}
+ROBOT SPECIFICATIONS - ViperX 300s
 ═══════════════════════════════════════════════════════════
 
 MODEL INFO:
-- Manufacturer: {robot_specs.get('manufacturer', 'Trossen Robotics')}
-- Type: {robot_specs.get('description', '6-DOF robotic arm')}
-- Degrees of Freedom: {robot_specs.get('dof', 6)}
-- Maximum Reach: {robot_specs.get('max_reach', 0.8)}m from base
-- Payload Capacity: {robot_specs.get('payload_capacity', 0.75)}kg
+- Manufacturer: Trossen Robotics
+- Type: 6-DOF robotic arm
+- Degrees of Freedom: 6
+- Maximum Reach: 0.75m from base
+- Payload Capacity: 0.75kg
 
 JOINT LIMITS (in degrees):
-- Waist (base rotation): {joint_limits_deg.get('waist', '[-180°, 180°]')}
-- Shoulder: {joint_limits_deg.get('shoulder', '[-108°, 114°]')}
-- Elbow: {joint_limits_deg.get('elbow', '[-123°, 92°]')}
-- Forearm Roll: {joint_limits_deg.get('forearm_roll', '[-180°, 180°]')}
-- Wrist Angle: {joint_limits_deg.get('wrist_angle', '[-100°, 123°]')}
-- Wrist Rotate: {joint_limits_deg.get('wrist_rotate', '[-180°, 180°]')}
+- Waist (base rotation): {joint_limits_deg['waist']}
+- Shoulder: {joint_limits_deg['shoulder']}
+- Elbow: {joint_limits_deg['elbow']}
+- Forearm Roll: {joint_limits_deg['forearm_roll']}
+- Wrist Angle: {joint_limits_deg['wrist_angle']}
+- Wrist Rotate: {joint_limits_deg['wrist_rotate']}
 
 LINK LENGTHS (in meters):
-- Base height: {link_lengths.get('base_height', 0.08915):.5f}m
-- Shoulder offset: {link_lengths.get('shoulder_offset', 0.050):.3f}m
-- Upper arm: {link_lengths.get('upper_arm', 0.200):.3f}m
-- Elbow offset: {link_lengths.get('elbow_offset', 0.050):.3f}m
-- Forearm: {link_lengths.get('forearm', 0.200):.3f}m
-- Wrist to gripper: {link_lengths.get('wrist_to_gripper', 0.065):.3f}m
-- Gripper fingers: {link_lengths.get('gripper_fingers', 0.025):.3f}m
+- Base height: {link_lengths['base_height']:.5f}m
+- Shoulder offset: {link_lengths['shoulder_offset']:.3f}m
+- Upper arm: {link_lengths['upper_arm']:.3f}m
+- Elbow offset: {link_lengths['elbow_offset']:.3f}m
+- Forearm: {link_lengths['forearm']:.3f}m
+- Wrist to gripper: {link_lengths['wrist_to_gripper']:.3f}m
+- Gripper fingers: {link_lengths['gripper_fingers']:.3f}m
 
 GRIPPER SPECIFICATIONS:
-- Type: {gripper.get('type', 'parallel_jaw')}
-- Opening range: [{gripper.get('min_opening', 0.0):.3f}m, {gripper.get('max_opening', 0.074):.3f}m]
-- Max force: {gripper.get('max_force', 30.0)}N (approximate)
-- Left finger range: [{gripper.get('left_finger_range', {}).get('min', 0.015):.3f}m, {gripper.get('left_finger_range', {}).get('max', 0.037):.3f}m]
-- Right finger range: [{gripper.get('right_finger_range', {}).get('min', -0.037):.3f}m, {gripper.get('right_finger_range', {}).get('max', -0.015):.3f}m]
+- Type: parallel_jaw
+- Opening range: [0.000m, 0.074m]
+- Max force: 30.0N (approximate)
 
 COORDINATE SYSTEM:
 - Convention: Right-handed coordinate system
@@ -224,7 +507,7 @@ CURRENT ROBOT STATE
 
 CURRENT JOINTS (degrees): {current_joints_deg}
 END-EFFECTOR POSITION: {ee_pos_str} meters (relative to robot base)
-GRIPPER STATE: {gripper_state} (position: {gripper_pos:.3f}m)
+GRIPPER STATE: {gripper_state_str} (position: {gripper_pos:.3f}m)
 
 WORKSPACE BOUNDS (relative to robot base, in meters):
 - X: {workspace_bounds.get('x', [0.1, 0.6])} (X+ forward, X- backward)
@@ -254,54 +537,6 @@ IMAGE 2 (SECOND IMAGE) - OVERHEAD CAMERA:
 CRITICAL: Images will always appear in the order above. First image = gripper view, Second image = overhead view.
           Use GRIPPER CAMERA to verify if an object is grasped.
           Use OVERHEAD CAMERA for spatial relationships and planning.
-
-═══════════════════════════════════════════════════════════
-OBJECT DETECTION WITH POINT MARKERS
-═══════════════════════════════════════════════════════════
-
-Point to all visible objects in both camera images.
-Identify what you see and return 2D point coordinates with descriptive labels.
-
-Format: {{"detections": [{{"point": [y, x], "label": "descriptive_name"}}]}}
-
-Requirements:
-- MANDATORY: Include detections array in every response
-- Coordinates normalized to 0-1000 (integers only)
-- Format: [y, x] - point at CENTER of each object
-- Use descriptive labels for what you see
-- Limit to 10 most relevant objects
-- If no objects detected, return empty array: {{"detections": []}}
-
-DETECTION INSTRUCTIONS:
-
-1. OVERHEAD CAMERA (second image):
-   - Point to all objects visible on the table surface
-   - Use descriptive labels for what you see (e.g., "green cube", "blue cube", "red object")
-   - Point to the center of each object
-   - Identify objects by their visual appearance (color, shape, size)
-
-2. GRIPPER CAMERA (first image):
-   - Point to the robot's gripper fingers
-   - Label them descriptively (e.g., "left gripper finger", "right gripper finger")
-   - Point to any objects visible in or near the gripper
-   - Point to center of each visible element
-
-IMPORTANT:
-- Describe what you actually SEE in the images
-- Use natural descriptive labels
-- Don't assume object names - identify by appearance
-- Point coordinates should be at object centers
-- Include gripper fingers in EVERY response
-
-Example response:
-{{
-  "detections": [
-    {{"point": [400, 300], "label": "green cube"}},
-    {{"point": [500, 600], "label": "blue cube"}},
-    {{"point": [800, 200], "label": "left gripper finger"}},
-    {{"point": [800, 800], "label": "right gripper finger"}}
-  ]
-}}
 
 AVAILABLE ROBOT FUNCTIONS:
 
@@ -509,15 +744,9 @@ Determine specific coordinates based on:
 - Task requirements (clearance for safety, precision for grasping)
 
 RESPONSE FORMAT:
-Return JSON with ONE function call and MANDATORY detections:
+Return JSON with ONE function call:
 {{
     "reasoning": "What I see in current images and why this step is needed",
-    "detections": [
-        {{"point": [400, 300], "label": "green cube"}},
-        {{"point": [500, 600], "label": "blue cube"}},
-        {{"point": [800, 200], "label": "left gripper finger"}},
-        {{"point": [800, 800], "label": "right gripper finger"}}
-    ],
     "next_action": {{
         "function": "move_arm",
         "args": {{"position": [0.3, 0.1, 0.24]}}
@@ -529,7 +758,6 @@ Return JSON with ONE function call and MANDATORY detections:
 When task is fully complete:
 {{
     "reasoning": "Verification complete - object is grasped and lifted as shown in images",
-    "detections": [],  // ALWAYS include, even if empty
     "next_action": null,
     "verification_check": null,
     "task_complete": true
@@ -616,6 +844,17 @@ IMPORTANT RULES:
     print(f"Step 1 - Next action: {next_func}")
     print(f"Task complete: {result.get('task_complete', False)}")
 
+    # Execute the function if there is one
+    execution_result = None
+    new_images = []
+    if next_action and not result.get('task_complete', False):
+        print(f"\n[ER Bridge] Executing: {next_func}")
+        execution_result = await execute_robot_function(next_action)
+        print(f"[ER Bridge] Execution result: {execution_result.get('success', False)}")
+
+        # Capture fresh images after execution
+        new_images = capture_camera_images()
+
     # Timing
     request_end_time = time.perf_counter()
     total_duration = request_end_time - request_start_time
@@ -630,8 +869,9 @@ IMPORTANT RULES:
         'conversation_id': conversation_id,
         'step': 1,
         'reasoning': result.get('reasoning', ''),
-        'detections': result.get('detections', []),
         'next_action': result.get('next_action'),
+        'execution_result': execution_result,
+        'images': new_images,
         'verification_check': result.get('verification_check', ''),
         'task_complete': result.get('task_complete', False)
     })
@@ -649,40 +889,37 @@ async def handle_feedback(conversation_id: str, data: dict, request_start_time: 
 
     conv = conversations[conversation_id]
 
-    # Validate execution result
-    execution_result = data.get('execution_result', {})
-    images = data.get('images', [])
+    # Get the previous execution result from the data (sent by frontend from last response)
+    prev_execution_result = data.get('execution_result', {})
 
-    # Validate expected camera count
-    if len(images) != 2:
-        print(f"⚠️  WARNING: Expected 2 images (gripper_cam, top_cam), got {len(images)}")
-        print(f"    Camera order MUST be: [gripper_cam, top_cam]")
+    # Capture fresh images for this feedback
+    images = capture_camera_images()
 
     print(f"\n{'=' * 60}")
     print(f"[Simple ER Bridge] FEEDBACK (conversation {conversation_id[:8]}...)")
     print(f"{'=' * 60}")
     print(f"Step: {conv['step'] + 1}")
-    print(f"Function executed: {execution_result.get('function', 'unknown')}")
-    print(f"Success: {execution_result.get('success', False)}")
-    print(f"New images: {len(images)} (expected: [gripper_cam, top_cam])")
+    print(f"Previous function: {prev_execution_result.get('function', 'unknown')}")
+    print(f"Previous success: {prev_execution_result.get('success', False)}")
+    print(f"New images: {len(images)} captured")
 
     # Build feedback context
     feedback_text = f"""EXECUTION RESULT (Step {conv['step']}):
 
-Function: {execution_result.get('function', 'unknown')}
-Arguments: {json.dumps(execution_result.get('args', {}), indent=2)}
-Success: {execution_result.get('success', False)}
+Function: {prev_execution_result.get('function', 'unknown')}
+Arguments: {json.dumps(prev_execution_result.get('args', {}), indent=2)}
+Success: {prev_execution_result.get('success', False)}
 """
 
-    if execution_result.get('success'):
-        if 'new_position' in execution_result:
-            feedback_text += f"New end-effector position: {execution_result['new_position']}\n"
-        if 'gripper_state' in execution_result:
-            feedback_text += f"Gripper state: {execution_result['gripper_state']}\n"
-        if 'message' in execution_result:
-            feedback_text += f"Message: {execution_result['message']}\n"
+    if prev_execution_result.get('success'):
+        if 'new_position' in prev_execution_result:
+            feedback_text += f"New end-effector position: {prev_execution_result['new_position']}\n"
+        if 'gripper_state' in prev_execution_result:
+            feedback_text += f"Gripper state: {prev_execution_result['gripper_state']}\n"
+        if 'message' in prev_execution_result:
+            feedback_text += f"Message: {prev_execution_result['message']}\n"
     else:
-        feedback_text += f"ERROR: {execution_result.get('error', 'Unknown error')}\n"
+        feedback_text += f"ERROR: {prev_execution_result.get('error', 'Unknown error')}\n"
 
     feedback_text += """
 NEW CAMERA IMAGES (above) show current robot state after execution.
@@ -754,6 +991,17 @@ Provide next function call or mark task complete.
     print(f"\nStep {conv['step']} - Next action: {next_func}")
     print(f"Task complete: {result.get('task_complete', False)}")
 
+    # Execute the function if there is one
+    execution_result = None
+    new_images = []
+    if next_action and not result.get('task_complete', False):
+        print(f"\n[ER Bridge] Executing: {next_func}")
+        execution_result = await execute_robot_function(next_action)
+        print(f"[ER Bridge] Execution result: {execution_result.get('success', False)}")
+
+        # Capture fresh images after execution
+        new_images = capture_camera_images()
+
     # Clean up if task complete
     if result.get('task_complete', False):
         print(f"Task complete - cleaning up conversation {conversation_id[:8]}...")
@@ -768,23 +1016,26 @@ Provide next function call or mark task complete.
     print(f"[Timing] Total: {total_duration:.3f}s, API: {api_call_duration:.3f}s")
     print(f"{'=' * 60}\n")
 
+    # Get current step before potential deletion
+    current_step = conv['step'] if conversation_id in conversations else conv['step']
+
     return web.json_response({
         'success': True,
         'conversation_id': conversation_id,
-        'step': conv['step'],
+        'step': current_step,
         'reasoning': result.get('reasoning', ''),
-        'detections': result.get('detections', []),
         'next_action': result.get('next_action'),
+        'execution_result': execution_result,
+        'images': new_images,
         'verification_check': result.get('verification_check', ''),
         'task_complete': result.get('task_complete', False)
     })
 
 
 def parse_iterative_response(response) -> dict:
-    """Parse iterative response expecting ONE function call and optional detections."""
+    """Parse iterative response expecting ONE function call."""
     result = {
         'reasoning': '',
-        'detections': [],
         'next_action': None,
         'verification_check': '',
         'task_complete': False
@@ -808,19 +1059,11 @@ def parse_iterative_response(response) -> dict:
             parsed = json.loads(response_text)
 
             result['reasoning'] = parsed.get('reasoning', '')
-            result['detections'] = parsed.get('detections', [])
             result['next_action'] = parsed.get('next_action')
             result['verification_check'] = parsed.get('verification_check', '')
             result['task_complete'] = parsed.get('task_complete', False)
 
             print(f"\nReasoning: {result['reasoning']}")
-            if result['detections']:
-                print(f"Detections: {len(result['detections'])} objects")
-                for det in result['detections']:
-                    if 'point' in det:
-                        print(f"  - {det.get('label', 'unknown')}: point {det.get('point', [])}")
-                    elif 'box_2d' in det:
-                        print(f"  - {det.get('label', 'unknown')}: box {det.get('box_2d', [])}")
             if result['next_action']:
                 print(f"Next action: {result['next_action'].get('function')} {result['next_action'].get('args', {})}")
 
@@ -828,17 +1071,14 @@ def parse_iterative_response(response) -> dict:
         print(f"Warning: Could not parse JSON response: {e}")
         print(f"Raw response (first 800 chars): {response.text[:800]}...")
         print(f"Response length: {len(response.text)} characters")
-        # Try to salvage partial JSON by finding the last complete object
+        # Try to salvage partial JSON
         try:
-            # Find the last complete JSON object by parsing up to the error position
             error_pos = int(str(e).split('char ')[-1].rstrip(')'))
             partial_text = response.text[:error_pos]
-            # Try to close any open objects/arrays
-            parsed = json.loads(partial_text + ']}}')  # Attempt to close
+            parsed = json.loads(partial_text + '}}')  # Attempt to close
             result['reasoning'] = parsed.get('reasoning', f"Parse error (recovered): {e}")
-            result['detections'] = parsed.get('detections', [])
             result['next_action'] = parsed.get('next_action')
-            print(f"Recovered partial response with {len(result.get('detections', []))} detections")
+            print(f"Recovered partial response")
         except:
             result['reasoning'] = f"Parse error: {e}"
         result['task_complete'] = True  # Fail safe
@@ -848,14 +1088,22 @@ def parse_iterative_response(response) -> dict:
 
 async def handle_status(request: web.Request) -> web.Response:
     """Status endpoint"""
+    robot_initialized = dynamixel_controller is not None
     return web.json_response({
         'bridge': 'simple_er_iterative',
         'sdk': 'google-genai',
         'status': 'running',
         'mode': 'iterative_with_visual_verification',
         'active_conversations': len(conversations),
-        'api_key_set': bool(os.getenv('GEMINI_API_KEY'))
+        'api_key_set': bool(os.getenv('GEMINI_API_KEY')),
+        'robot_initialized': robot_initialized
     })
+
+
+async def on_cleanup(app):
+    """Cleanup handler for graceful shutdown."""
+    print("\n[ER Bridge] Application shutting down...")
+    shutdown_robot()
 
 
 def make_app() -> web.Application:
@@ -880,32 +1128,31 @@ def make_app() -> web.Application:
     for route in list(app.router.routes()):
         cors.add(route)
 
+    # Register cleanup handler
+    app.on_cleanup.append(on_cleanup)
+
     return app
 
 
 if __name__ == '__main__':
+    import argparse
+
+    parser = argparse.ArgumentParser(description='Gemini Robotics ER Bridge with Dynamixel Control')
+    parser.add_argument('--port', type=int, default=8082, help='Server port (default: 8082)')
+    parser.add_argument('--dxl-port', type=str, default='/dev/ttyDXL', help='Dynamixel serial port')
+    parser.add_argument('--baudrate', type=int, default=1000000, help='Dynamixel baudrate')
+    parser.add_argument('--no-robot', action='store_true', help='Run without robot hardware (for testing)')
+    args = parser.parse_args()
+
     print("=" * 60)
-    print("Simple Robotics ER Bridge - Iterative with Visual Verification")
+    print("Gemini Robotics ER Bridge - Direct Dynamixel Control")
     print("=" * 60)
     print()
-    print("Implements Google's 4-step function calling pattern:")
-    print("  1. Define functions (in prompt)")
-    print("  2. Call LLM with current camera images")
-    print("  3. Execute ONE function at a time")
-    print("  4. Return execution result + NEW images")
-    print()
-    print("Key features:")
-    print("  - ONE function call per response (not arrays)")
-    print("  - Visual verification after EACH step")
+    print("Features:")
+    print("  - Direct hardware control via Dynamixel SDK")
+    print("  - Automatic camera capture (gripper_cam + top_cam)")
+    print("  - Iterative visual verification")
     print("  - Conversation state maintained")
-    print("  - Model can verify, adjust, retry based on images")
-    print()
-    print("Starting server on http://localhost:8082")
-    print("Endpoints:")
-    print("  - POST /robotics-er-request")
-    print("      Initial: {prompt, images, context}")
-    print("      Feedback: {conversation_id, execution_result, images}")
-    print("  - GET /status")
     print()
 
     if not os.getenv('GEMINI_API_KEY'):
@@ -913,4 +1160,27 @@ if __name__ == '__main__':
         print("Set it in your shell or .env file")
         print()
 
-    web.run_app(make_app(), host='0.0.0.0', port=8082)
+    # Initialize robot hardware
+    if not args.no_robot:
+        if not initialize_robot(port=args.dxl_port, baudrate=args.baudrate):
+            print("\nERROR: Failed to initialize robot hardware!")
+            print("Run with --no-robot flag to start without hardware.")
+            sys.exit(1)
+    else:
+        print("WARNING: Running without robot hardware (--no-robot flag)")
+        print()
+
+    print(f"Starting server on http://localhost:{args.port}")
+    print("Endpoints:")
+    print("  - POST /robotics-er-request")
+    print("      Initial: {prompt}")
+    print("      Feedback: {conversation_id, execution_result}")
+    print("  - GET /status")
+    print()
+
+    try:
+        web.run_app(make_app(), host='0.0.0.0', port=args.port)
+    except KeyboardInterrupt:
+        print("\nShutting down...")
+    finally:
+        shutdown_robot()
