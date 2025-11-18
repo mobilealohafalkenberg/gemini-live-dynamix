@@ -191,20 +191,20 @@ async def execute_robot_function(next_action: dict) -> dict:
 
             if pose:
                 # Move to named pose
-                success = await asyncio.get_event_loop().run_in_executor(
+                move_result = await asyncio.get_event_loop().run_in_executor(
                     None,
                     lambda: arm_controller.move_to_pose(pose, moving_time=moving_time, blocking=True)
                 )
-                result['success'] = success
+                result['success'] = move_result.get('success', False)
                 result['message'] = f"Moved to pose '{pose}'"
             elif position:
                 # Move to Cartesian position
                 x, y, z = position
-                success = await asyncio.get_event_loop().run_in_executor(
+                move_result = await asyncio.get_event_loop().run_in_executor(
                     None,
                     lambda: arm_controller.move_to_position(x, y, z, moving_time=moving_time, blocking=True)
                 )
-                result['success'] = success
+                result['success'] = move_result.get('success', False)
                 result['new_position'] = position
                 result['message'] = f"Moved to position [{x:.3f}, {y:.3f}, {z:.3f}]"
             else:
@@ -214,17 +214,17 @@ async def execute_robot_function(next_action: dict) -> dict:
             action = args.get('action')
 
             if action == 'open':
-                success = await asyncio.get_event_loop().run_in_executor(
+                gripper_result = await asyncio.get_event_loop().run_in_executor(
                     None, gripper_controller.open_gripper
                 )
-                result['success'] = success
+                result['success'] = gripper_result.get('success', False)
                 result['gripper_state'] = 'open'
                 result['message'] = 'Gripper opened'
             elif action == 'close':
-                success = await asyncio.get_event_loop().run_in_executor(
+                gripper_result = await asyncio.get_event_loop().run_in_executor(
                     None, gripper_controller.close_gripper
                 )
-                result['success'] = success
+                result['success'] = gripper_result.get('success', False)
                 result['gripper_state'] = 'closed'
                 result['message'] = 'Gripper closed'
             else:
