@@ -28,18 +28,20 @@ from aiohttp import web
 from aiohttp_cors import setup, ResourceOptions
 
 # Add parent directory to path to import controllers
-sys.path.append(str(Path(__file__).parent.parent.parent))
-from gripper_controller import GripperController
-from arm_controller import ArmController
-from camera_controller import CameraController
-from vision_controller import VisionController
+sys.path.append(str(Path(__file__).parent.parent))
+from dynamixel_controller import DynamixelController
+from models.vx300s_model import VX300S
+from controllers.gripper_controller import GripperController
+from controllers.arm_controller import ArmController
+from controllers.camera_controller import CameraController
+from controllers.vision_controller import VisionController
 
 # Global controller instances
+dynamixel_controller = None  # Shared Dynamixel SDK controller
 gripper_controller = None
 arm_controller = None
 camera_controller = None
 vision_controller = None
-launch_process = None
 
 # Global operation tracking
 # Format: {operation_id: {type, status, started_at, completed_at, result, error}}
@@ -910,79 +912,92 @@ async def execute_pick_and_place(operation_id: str, args: dict):
 
 async def initialize_robot():
     """Initialize the robot on startup."""
-    global gripper_controller, arm_controller, camera_controller, vision_controller, launch_process
+    global dynamixel_controller, gripper_controller, arm_controller, camera_controller, vision_controller
 
-    print("[Bridge] Starting robot driver...")
+    print("[Bridge] Initializing Dynamixel SDK...")
 
-    # Launch the robot driver using bringup.sh
-    launch_script = Path("/home/aloha/bringup.sh")
-    if launch_script.exists():
-        try:
-            cmd = f"source /opt/ros/humble/setup.bash && source ~/interbotix_ws/install/setup.bash && bash {str(launch_script)}"
-            # Start the launch script in background
-            launch_process = subprocess.Popen(
-                ['bash','-c',cmd],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                preexec_fn=os.setsid  # Create new process group for clean shutdown
-            )
-            print(f"[Bridge] Robot driver launched (PID: {launch_process.pid})")
-
-            # Wait a bit for driver to start
-            await asyncio.sleep(5)
-
-        except Exception as e:
-            print(f"[Bridge] Warning: Could not launch robot driver: {e}")
-            print("[Bridge] Make sure to run bringup.sh manually")
-    else:
-        print(f"[Bridge] Launch script not found at {launch_script}")
-        print("[Bridge] Please run bringup.sh manually in another terminal")
-
-    # Initialize the gripper controller first
-    print("[Bridge] Initializing gripper controller...")
-    gripper_controller = GripperController()
-
-    # Try to connect to robot
+    # Initialize DynamixelController (shared by arm and gripper)
     try:
-        # Initialize gripper first
+        port = "/dev/ttyDXL"  # or /dev/ttyUSB0
+        baudrate = 1000000
+
+        print(f"[Bridge] Connecting to Dynamixel port: {port} at {baudrate} baud")
+        dynamixel_controller = DynamixelController(port=port, baudrate=baudrate)
+
+        # Connect to motors
+        if not dynamixel_controller.connect():
+            print(f"[Bridge] ✗ Failed to connect to Dynamixel port: {port}")
+            print("[Bridge] Please check:")
+            print("  1. Port exists: ls -l /dev/ttyDXL /dev/ttyUSB*")
+            print("  2. User has permissions: sudo usermod -aG dialout $USER")
+            print("  3. Power supply is connected")
+            raise Exception("Failed to connect to Dynamixel motors")
+
+        print("[Bridge] ✓ Connected to Dynamixel motors")
+
+        # Initialize all motors
+        print("[Bridge] Initializing motors...")
+        if not dynamixel_controller.initialize_motors():
+            print("[Bridge] ✗ Failed to initialize motors")
+            raise Exception("Failed to initialize Dynamixel motors")
+
+        print("[Bridge] ✓ All motors initialized successfully")
+
+    except Exception as e:
+        print(f"[Bridge] ✗ Dynamixel initialization failed: {e}")
+        print("[Bridge] Running in mock mode - no real robot control")
+        dynamixel_controller = None
+
+    # Initialize gripper controller (shares DynamixelController)
+    print("[Bridge] Initializing gripper controller...")
+    try:
+        gripper_controller = GripperController(
+            dynamixel_controller=dynamixel_controller
+        )
+
         gripper_success = gripper_controller.initialize()
         if gripper_success:
             print("[Bridge] ✓ Gripper controller initialized successfully")
             # Get initial state
             state = gripper_controller.get_gripper_state()
             print(f"[Bridge] Initial gripper state: {state['state']} ({state['position_normalized']*100:.1f}% open)")
-
-            # Initialize arm controller sharing the same bot and node
-            print("[Bridge] Initializing arm controller (sharing robot interface)...")
-            arm_controller = ArmController(
-                robot_model='vx300s',
-                robot_name='follower_left',
-                node=gripper_controller.node,  # Share the node
-                bot=gripper_controller.bot      # Share the bot
-            )
-
-            # Initialize arm (will use existing bot)
-            arm_success = arm_controller.initialize()
-            if arm_success:
-                print("[Bridge] ✓ Arm controller initialized successfully")
-                # Get initial state
-                arm_state = arm_controller.get_arm_state()
-                if arm_state['pose']:
-                    print(f"[Bridge] Arm at {arm_state['pose']} pose")
-                else:
-                    print(f"[Bridge] Arm joints: {[f'{j:.2f}' for j in arm_state['joints_degrees']]}°")
-            else:
-                print("[Bridge] ✗ Failed to initialize arm controller")
         else:
             print("[Bridge] ✗ Failed to initialize gripper controller")
-            # Still create arm controller for mock mode
-            arm_controller = ArmController()
+            gripper_success = False
 
-        if not (gripper_success and arm_success):
-            print("[Bridge] Make sure the robot is powered on and connected")
     except Exception as e:
-        print(f"[Bridge] ✗ Error initializing controllers: {e}")
-        print("[Bridge] Running in mock mode - no real robot control")
+        print(f"[Bridge] ✗ Error initializing gripper controller: {e}")
+        gripper_success = False
+
+    # Initialize arm controller (shares DynamixelController)
+    print("[Bridge] Initializing arm controller...")
+    try:
+        robot_model = VX300S()
+        arm_controller = ArmController(
+            dynamixel_controller=dynamixel_controller,
+            robot_model=robot_model
+        )
+
+        arm_success = arm_controller.initialize()
+        if arm_success:
+            print("[Bridge] ✓ Arm controller initialized successfully")
+            # Get initial state
+            arm_state = arm_controller.get_arm_state()
+            if arm_state.get('pose'):
+                print(f"[Bridge] Arm at {arm_state['pose']} pose")
+            else:
+                print(f"[Bridge] Arm joints: {[f'{j:.2f}' for j in arm_state['joints_degrees']]}°")
+        else:
+            print("[Bridge] ✗ Failed to initialize arm controller")
+            arm_success = False
+
+    except Exception as e:
+        print(f"[Bridge] ✗ Error initializing arm controller: {e}")
+        arm_success = False
+
+    if not (gripper_success and arm_success):
+        print("[Bridge] Make sure the robot is powered on and connected")
+        print("[Bridge] Running in mock mode for failed controllers")
 
     # Initialize camera controller (separate from robot control)
     print("[Bridge] Initializing camera controller...")
@@ -1000,26 +1015,44 @@ async def initialize_robot():
     except Exception as e:
         print(f"[Bridge] ✗ Error initializing cameras: {e}")
 
-    # Initialize vision controller (requires GEMINI_API_KEY)
+    # Initialize vision controller (requires camera_controller and GOOGLE_API_KEY)
     print("[Bridge] Initializing vision controller...")
     try:
-        gemini_key = os.environ.get('GEMINI_API_KEY')
-        if gemini_key:
-            # Check for calibration file
-            calibration_file = Path(__file__).parent.parent.parent / "vision_calibration.json"
+        if camera_controller and camera_controller.initialized:
+            gemini_key = os.environ.get('GOOGLE_API_KEY') or os.environ.get('GEMINI_API_KEY')
+
+            # Check for calibration file (YAML format)
+            calibration_file = Path(__file__).parent.parent / "camera_calibration.yaml"
+
             if calibration_file.exists():
-                vision_controller = VisionController(api_key=gemini_key, calibration_file=str(calibration_file))
-                print("[Bridge] ✓ Vision controller initialized with Gemini API and calibration")
+                vision_controller = VisionController(
+                    camera_controller=camera_controller,
+                    gemini_api_key=gemini_key,
+                    calibration_file=str(calibration_file)
+                )
+                print("[Bridge] ✓ Vision controller initialized with calibrated transforms")
+                print(f"[Bridge]   Loaded calibration from: {calibration_file}")
             else:
-                vision_controller = VisionController(api_key=gemini_key)
-                print("[Bridge] ✓ Vision controller initialized with Gemini API (uncalibrated)")
-                print("[Bridge] ⚠️  Run calibration script for accurate positioning: python3 calibrate_cameras.py")
+                vision_controller = VisionController(
+                    camera_controller=camera_controller,
+                    gemini_api_key=gemini_key
+                )
+                print("[Bridge] ✓ Vision controller initialized with default transforms")
+                print("[Bridge] ⚠️  For accurate object positioning, calibrate cameras:")
+                print("[Bridge]    python3 -m vision.calibrate_cameras --camera top_cam --tag-id 0")
+
+            # Get vision status
+            status = vision_controller.get_status()
+            print(f"[Bridge]   Vision initialized: {status['initialized']}")
         else:
-            print("[Bridge] ⚠️  GEMINI_API_KEY not found - vision features will use placeholders")
-            print("[Bridge]    Set GEMINI_API_KEY environment variable to enable real computer vision")
+            print("[Bridge] ⚠️  Camera controller not available - vision disabled")
+            print("[Bridge]    Vision features will not work until cameras are initialized")
     except Exception as e:
         print(f"[Bridge] ✗ Error initializing vision controller: {e}")
-        print("[Bridge] Vision features will use placeholder responses")
+        print(f"[Bridge]   {type(e).__name__}: {str(e)}")
+        print("[Bridge]   Vision features disabled")
+        import traceback
+        traceback.print_exc()
 
 
 # ============================================================================
@@ -1720,7 +1753,7 @@ async def handle_status(request: web.Request) -> web.Response:
 
 async def cleanup(app):
     """Cleanup on shutdown."""
-    global gripper_controller, arm_controller, camera_controller, vision_controller, launch_process, executor
+    global dynamixel_controller, gripper_controller, arm_controller, camera_controller, vision_controller, executor
 
     print("\n[Bridge] Shutting down...")
 
@@ -1744,18 +1777,16 @@ async def cleanup(app):
     # Shutdown gripper controller
     if gripper_controller:
         try:
-            gripper_controller.sleep_arm()
             gripper_controller.shutdown()
             print("[Bridge] Gripper controller shutdown complete")
         except:
             pass
 
-    # Terminate launch process
-    if launch_process:
+    # Close DynamixelController
+    if dynamixel_controller:
         try:
-            import signal
-            os.killpg(os.getpgid(launch_process.pid), signal.SIGTERM)
-            print("[Bridge] Robot driver terminated")
+            dynamixel_controller.disconnect()
+            print("[Bridge] Dynamixel controller disconnected")
         except:
             pass
 

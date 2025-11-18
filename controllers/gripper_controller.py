@@ -3,6 +3,8 @@
 """
 Gripper Controller API for Mobile ALOHA
 Designed to be called from external scripts (e.g., Gemini Live API integration)
+
+REFACTORED: Now uses DynamixelController (No ROS2)
 """
 
 import time
@@ -11,19 +13,18 @@ import warnings
 from enum import Enum
 from typing import Dict, Optional, Tuple
 import logging
+from pathlib import Path
+import sys
 
-from aloha.robot_utils import move_arms, move_grippers, torque_on
-from aloha.constants import (
-    FOLLOWER_GRIPPER_JOINT_OPEN, 
-    FOLLOWER_GRIPPER_JOINT_CLOSE,
-    START_ARM_POSE
-)
-from interbotix_common_modules.common_robot.robot import (
-    create_interbotix_global_node,
-    robot_shutdown,
-    robot_startup,
-)
-from interbotix_xs_modules.xs_robot.arm import InterbotixManipulatorXS
+# Add parent directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+# Direct Dynamixel control (replaces ROS2)
+from dynamixel_controller import DynamixelController
+
+# Gripper position constants (radians)
+FOLLOWER_GRIPPER_JOINT_OPEN = 1.62   # Fully open
+FOLLOWER_GRIPPER_JOINT_CLOSE = -0.62  # Fully closed
 
 
 class GripperState(Enum):
@@ -49,23 +50,67 @@ class GripperController:
         controller.shutdown()
     """
     
-    def __init__(self, robot_model='vx300s', robot_name='follower_left', dry_run=False):
-        """Initialize controller (does not connect to robot yet)"""
-        self.robot_model = robot_model
-        self.robot_name = robot_name
+    def __init__(self, dynamixel_controller: Optional[DynamixelController] = None, dry_run=False):
+        """Initialize controller (does not connect to robot yet)
+
+        Args:
+            dynamixel_controller: Shared DynamixelController instance
+            dry_run: If True, validate but don't execute movements
+        """
+        self.dxl = dynamixel_controller  # Shared DynamixelController
         self.dry_run = dry_run
-        self.bot = None
-        self.node = None
         self.initialized = False
         self.current_state = GripperState.UNKNOWN
         self.gripper_position = 0.0
         self.state_lock = threading.Lock()
         self.monitor_failure_count = 0
-        
+
+        # Gripper motor ID
+        self.gripper_motor_id = 9
+
         # Gripper position thresholds
         self.OPEN_THRESHOLD = FOLLOWER_GRIPPER_JOINT_OPEN - 0.1
         self.CLOSE_THRESHOLD = FOLLOWER_GRIPPER_JOINT_CLOSE + 0.1
-        
+
+    def _radians_to_dynamixel(self, radians: float) -> int:
+        """
+        Convert gripper position in radians to Dynamixel units.
+
+        Gripper range:
+        - Closed (-0.62 rad) → 1000 Dynamixel units
+        - Open (1.62 rad) → 3800 Dynamixel units
+
+        Args:
+            radians: Gripper position in radians
+
+        Returns:
+            Dynamixel position (0-4095)
+        """
+        # Linear mapping
+        # closed_rad = -0.62 → 1000 units
+        # open_rad = 1.62 → 3800 units
+        rad_range = FOLLOWER_GRIPPER_JOINT_OPEN - FOLLOWER_GRIPPER_JOINT_CLOSE  # 2.24
+        unit_range = 3800 - 1000  # 2800
+
+        units = int(((radians - FOLLOWER_GRIPPER_JOINT_CLOSE) / rad_range) * unit_range + 1000)
+        return max(0, min(4095, units))
+
+    def _dynamixel_to_radians(self, dynamixel_pos: int) -> float:
+        """
+        Convert Dynamixel units to radians.
+
+        Args:
+            dynamixel_pos: Dynamixel position (0-4095)
+
+        Returns:
+            Gripper position in radians
+        """
+        rad_range = FOLLOWER_GRIPPER_JOINT_OPEN - FOLLOWER_GRIPPER_JOINT_CLOSE
+        unit_range = 3800 - 1000
+
+        radians = ((dynamixel_pos - 1000) / unit_range) * rad_range + FOLLOWER_GRIPPER_JOINT_CLOSE
+        return radians
+
     def initialize(self) -> bool:
         """
         Initialize robot connection and move to starting position.
@@ -81,49 +126,47 @@ class GripperController:
             return True
 
         try:
-            print("[GripperController] Initializing robot connection...")
-            
-            # Create ROS node
-            self.node = create_interbotix_global_node('gripper_controller')
-            
-            # Create robot interface
-            self.bot = InterbotixManipulatorXS(
-                robot_model=self.robot_model,
-                robot_name=self.robot_name,
-                node=self.node,
-                iterative_update_fk=False,
+            print("[GripperController] Initializing gripper controller...")
+
+            # Verify DynamixelController is provided and initialized
+            if self.dxl is None:
+                print("[GripperController] ✗ No DynamixelController provided")
+                return False
+
+            # Verify DynamixelController is connected
+            if not self.dxl.port_handler or not self.dxl.port_handler.is_open:
+                print("[GripperController] ✗ DynamixelController not connected")
+                return False
+
+            # Set current limit for safe grasping (300mA)
+            print("[GripperController] Configuring gripper motor...")
+            self.dxl.write_register(
+                self.gripper_motor_id,
+                self.dxl.ADDR_CURRENT_LIMIT,
+                2,
+                300  # 300mA for safe grasping
             )
-            
-            # Start ROS
-            robot_startup(self.node)
-            
-            # Configure motors
-            print("[GripperController] Configuring motors...")
-            self.bot.core.robot_reboot_motors('single', 'gripper', True)
-            self.bot.core.robot_set_operating_modes('group', 'arm', 'position')
-            self.bot.core.robot_set_operating_modes('single', 'gripper', 'current_based_position')
-            self.bot.core.robot_set_motor_registers('single', 'gripper', 'current_limit', 300)
-            
-            # Enable torque
-            torque_on(self.bot)
-            
-            # Move to starting position
-            print("[GripperController] Moving to starting position...")
-            start_arm_qpos = START_ARM_POSE[:6]
-            move_arms([self.bot], [start_arm_qpos], moving_time=4.0)
-            move_grippers([self.bot], [FOLLOWER_GRIPPER_JOINT_CLOSE], moving_time=0.5)
-            
+
+            # Enable torque on gripper motor
+            print("[GripperController] Enabling gripper torque...")
+            self.dxl.enable_torque([self.gripper_motor_id])
+
+            # Close gripper to starting position
+            print("[GripperController] Moving to closed position...")
+            self.close_gripper(blocking=True)
+
             self.initialized = True
-            self.current_state = GripperState.CLOSED
-            
+
             # Start position monitoring thread
             self._start_position_monitor()
-            
+
             print("[GripperController] ✓ Initialization complete")
             return True
-            
+
         except Exception as e:
             print(f"[GripperController] ✗ Initialization failed: {e}")
+            import traceback
+            traceback.print_exc()
             return False
     
     def _start_position_monitor(self):
@@ -136,10 +179,16 @@ class GripperController:
         def monitor():
             while self.initialized:
                 try:
-                    # Get current gripper position from hardware
-                    with self.bot.core.js_mutex:
-                        gripper_index = self.bot.gripper.left_finger_index
-                        position = self.bot.core.joint_states.position[gripper_index]
+                    # Read gripper position from DynamixelController
+                    positions = self.dxl.sync_read_positions()
+                    if self.gripper_motor_id not in positions:
+                        self.monitor_failure_count += 1
+                        continue
+
+                    dynamixel_pos = positions[self.gripper_motor_id]
+
+                    # Convert to radians
+                    position = self._dynamixel_to_radians(dynamixel_pos)
 
                     # Update shared state with lock protection
                     with self.state_lock:
@@ -154,8 +203,10 @@ class GripperController:
                             elif position <= self.CLOSE_THRESHOLD:
                                 if self.current_state == GripperState.CLOSING:
                                     self.current_state = GripperState.CLOSED
+
                     # Reset failure counter on success
                     self.monitor_failure_count = 0
+
                 except Exception as e:
                     self.monitor_failure_count += 1
                     logging.error(
@@ -208,7 +259,8 @@ class GripperController:
             print("[GripperController] 🔧 DRY-RUN: Simulated gripper open")
         else:
             # Hardware mode: Execute real movement
-            move_grippers([self.bot], [FOLLOWER_GRIPPER_JOINT_OPEN], moving_time=1.0)
+            dynamixel_pos = self._radians_to_dynamixel(FOLLOWER_GRIPPER_JOINT_OPEN)
+            self.dxl.sync_write_positions({self.gripper_motor_id: dynamixel_pos})
 
             if blocking:
                 time.sleep(1.0)
@@ -241,12 +293,30 @@ class GripperController:
 
         print("[GripperController] Closing gripper...")
 
-        result = self.get_gripper_state()  
+        # Dry-run mode: Simulate movement
+        if self.dry_run:
+            if blocking:
+                time.sleep(0.1)  # Simulate brief movement
+                with self.state_lock:
+                    self.gripper_position = FOLLOWER_GRIPPER_JOINT_CLOSE
+                    self.current_state = GripperState.CLOSED
+            print("[GripperController] 🔧 DRY-RUN: Simulated gripper close")
+        else:
+            # Hardware mode: Execute real movement
+            dynamixel_pos = self._radians_to_dynamixel(FOLLOWER_GRIPPER_JOINT_CLOSE)
+            self.dxl.sync_write_positions({self.gripper_motor_id: dynamixel_pos})
+
+            if blocking:
+                time.sleep(1.0)
+                with self.state_lock:
+                    self.current_state = GripperState.CLOSED
+
+        result = self.get_gripper_state()
         # Verify grasp if requested
         if verify_grasp and blocking:
             grasp_check = self.verify_grasp()
             result.update(grasp_check)
-        
+
         return result
     
     def get_gripper_state(self) -> Dict:
@@ -337,7 +407,8 @@ class GripperController:
             print(f"[GripperController] 🔧 DRY-RUN: Simulated gripper position {actual_position:.3f}")
         else:
             # Hardware mode: Execute real movement
-            move_grippers([self.bot], [actual_position], moving_time=1.0)
+            dynamixel_pos = self._radians_to_dynamixel(actual_position)
+            self.dxl.sync_write_positions({self.gripper_motor_id: dynamixel_pos})
 
             if blocking:
                 time.sleep(1.0)
@@ -378,11 +449,26 @@ class GripperController:
             }
 
         try:
-            # Get current gripper position and motor current
-            with self.bot.core.js_mutex:
-                gripper_index = self.bot.gripper.left_finger_index
-                current_position = self.bot.core.joint_states.position[gripper_index]
-                motor_current = abs(self.bot.core.joint_states.current[gripper_index])  # mA
+            # Read current gripper position and motor current from DynamixelController
+            positions = self.dxl.sync_read_positions()
+            if self.gripper_motor_id not in positions:
+                return {
+                    "object_grasped": False,
+                    "grasp_verified": False,
+                    "error": "Failed to read gripper position"
+                }
+
+            dynamixel_pos = positions[self.gripper_motor_id]
+            current_position = self._dynamixel_to_radians(dynamixel_pos)
+
+            # Read motor current
+            motor_current_raw = self.dxl.read_register(
+                self.gripper_motor_id,
+                self.dxl.ADDR_PRESENT_CURRENT,
+                2
+            )
+            # Convert to mA (Dynamixel current is in 2.69mA units)
+            motor_current = abs(motor_current_raw * 2.69) if motor_current_raw is not None else 0
 
             # Method 1: Position-based detection
             # If gripper commanded to close but stopped before fully closed,
@@ -401,11 +487,16 @@ class GripperController:
             EMPTY_CURRENT_THRESHOLD = 50   # mA - typical empty gripper current
 
             current_indicates_grasp = motor_current > GRASP_CURRENT_THRESHOLD
+
             # Method 3: Stability check
             # Wait a moment and check if position is stable
             time.sleep(0.2)
-            with self.bot.core.js_mutex:
-                position_after = self.bot.core.joint_states.position[gripper_index]
+            positions_after = self.dxl.sync_read_positions()
+            if self.gripper_motor_id in positions_after:
+                dynamixel_pos_after = positions_after[self.gripper_motor_id]
+                position_after = self._dynamixel_to_radians(dynamixel_pos_after)
+            else:
+                position_after = current_position
 
             position_stable = abs(position_after - current_position) < 0.02
 
@@ -485,7 +576,7 @@ class GripperController:
                 print("[GripperController] 🔧 DRY-RUN: Simulated emergency stop")
             else:
                 # Hardware mode: Actually disable torque
-                self.bot.core.robot_torque_enable('single', 'gripper', False)
+                self.dxl.disable_torque([self.gripper_motor_id])
 
             with self.state_lock:
                 self.current_state = GripperState.ERROR
@@ -540,15 +631,19 @@ class GripperController:
             # Hardware mode: Actual recovery
             # Re-enable torque
             print("[GripperController] Re-enabling gripper torque")
-            self.bot.core.robot_torque_enable('single', 'gripper', True)
+            self.dxl.enable_torque([self.gripper_motor_id])
 
             # Capture current position
             print("[GripperController] Capturing current position")
             time.sleep(0.1)  # Brief wait for torque to stabilize
 
-            with self.bot.core.js_mutex:
-                gripper_index = self.bot.gripper.left_finger_index
-                current_position = self.bot.core.joint_states.position[gripper_index]
+            positions = self.dxl.sync_read_positions()
+            if self.gripper_motor_id not in positions:
+                print("[GripperController] ✗ Failed to read gripper position")
+                return {"success": False, "error": "Failed to read gripper position", "state": "error"}
+
+            dynamixel_pos = positions[self.gripper_motor_id]
+            current_position = self._dynamixel_to_radians(dynamixel_pos)
 
             # Validate current position is within safe range
             if current_position < FOLLOWER_GRIPPER_JOINT_CLOSE or current_position > FOLLOWER_GRIPPER_JOINT_OPEN:
@@ -593,7 +688,7 @@ class GripperController:
             # If we enabled torque but failed during position capture, disable it again for safety
             try:
                 if not self.dry_run:
-                    self.bot.core.robot_torque_enable('single', 'gripper', False)
+                    self.dxl.disable_torque([self.gripper_motor_id])
                     print("[GripperController] Torque disabled after resume failure")
             except:
                 pass  # If disabling torque also fails, we can't do much more
@@ -602,32 +697,15 @@ class GripperController:
 
     def sleep_arm(self) -> bool:
         """
-        Move arm to sleep position.
-        
+        DEPRECATED: This method belongs in ArmController, not GripperController.
+        Kept for backwards compatibility but does nothing.
+
         Returns:
-            True if successful, False otherwise
+            False (not implemented)
         """
-        if not self.initialized:
-            print("[GripperController] Cannot sleep - not initialized")
-            return False
-        
-        try:
-            print("[GripperController] Moving arm to sleep position...")
-            
-            # Home position first
-            home_position = [0.0, -0.96, 1.16, 0.0, -0.3, 0.0]
-            move_arms([self.bot], [home_position], moving_time=3.0)
-            
-            # Sleep position with wrist pointing up
-            sleep_positions = [0.0, -1.85, 1.55, 0.0, -1.57, 0.0]
-            move_arms([self.bot], [sleep_positions], moving_time=3.0)
-            
-            print("[GripperController] ✓ Arm in sleep position")
-            return True
-            
-        except Exception as e:
-            print(f"[GripperController] ✗ Sleep failed: {e}")
-            return False
+        print("[GripperController] ⚠️ WARNING: sleep_arm() is deprecated and has been moved to ArmController")
+        print("[GripperController] Please use ArmController.move_to_pose('sleep') instead")
+        return False
     
     def shutdown(self):
         """
@@ -636,11 +714,8 @@ class GripperController:
         print("[GripperController] Shutting down...")
         self.initialized = False
 
-        # Dry-run mode: Skip hardware shutdown
-        if self.dry_run:
-            print("[GripperController] 🔧 DRY-RUN: Skipping hardware shutdown")
-        elif self.node:
-            robot_shutdown(self.node)
+        # Note: DynamixelController is shared, so we don't close it here
+        # The bridge that created it will handle cleanup
 
         print("[GripperController] ✓ Shutdown complete")
     
