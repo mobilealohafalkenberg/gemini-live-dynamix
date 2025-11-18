@@ -273,12 +273,12 @@ def capture_camera_images() -> list:
     images = []
 
     try:
-        # Capture gripper camera (first)
-        gripper_img = camera_controller.get_frame('gripper_cam')
+        # Capture gripper camera (first) - get base64 encoded JPEG
+        gripper_img = camera_controller.get_frame_base64('gripper_cam')
         images.append(gripper_img if gripper_img else '')
 
-        # Capture top/overhead camera (second)
-        top_img = camera_controller.get_frame('top_cam')
+        # Capture top/overhead camera (second) - get base64 encoded JPEG
+        top_img = camera_controller.get_frame_base64('top_cam')
         images.append(top_img if top_img else '')
 
         print(f"[ER Bridge] Captured camera images: gripper={len(gripper_img) if gripper_img else 0}B, top={len(top_img) if top_img else 0}B")
