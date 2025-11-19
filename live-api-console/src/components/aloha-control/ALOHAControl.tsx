@@ -4,6 +4,46 @@ import { FunctionDeclaration, Type } from '@google/genai';
 import { ApiResponseViewer } from '../api-response-viewer/ApiResponseViewer';
 
 const ROBOT_ENDPOINT = process.env.REACT_APP_ROBOT_ENDPOINT || 'http://localhost:8081';
+const ER_BRIDGE_ENDPOINT = process.env.REACT_APP_ER_BRIDGE_ENDPOINT || 'http://localhost:8082';
+
+// ER Bridge Response Types
+interface ERAction {
+  function: string;
+  args: Record<string, any>;
+}
+
+interface ERExecutionResult {
+  success: boolean;
+  function: string;
+  args: Record<string, any>;
+  message?: string;
+  error?: string;
+  new_position?: number[];
+  gripper_state?: string;
+}
+
+interface ERResponse {
+  success: boolean;
+  conversation_id: string;
+  step: number;
+  reasoning: string;
+  next_action: ERAction | null;
+  execution_result: ERExecutionResult | null;
+  images: string[];
+  verification_check: string;
+  task_complete: boolean;
+  error?: string;
+}
+
+interface ERStep {
+  step: number;
+  reasoning: string;
+  action: ERAction | null;
+  result: ERExecutionResult | null;
+  verification: string;
+  images: string[];
+  timestamp: string;
+}
 
 const toolControlGripper: FunctionDeclaration = {
   name: 'control_gripper',
@@ -278,6 +318,15 @@ export function ALOHAControl() {
   });
   const [apiMessages, setApiMessages] = useState<ApiMessage[]>([]);
 
+  // ER Bridge State
+  const [erTaskInput, setErTaskInput] = useState('');
+  const [erConversationId, setErConversationId] = useState<string | null>(null);
+  const [erSteps, setErSteps] = useState<ERStep[]>([]);
+  const [erIsExecuting, setErIsExecuting] = useState(false);
+  const [erTaskComplete, setErTaskComplete] = useState(false);
+  const [erCurrentTask, setErCurrentTask] = useState<string>('');
+  const [erCameraImages, setErCameraImages] = useState<string[]>([]);
+
   // Configure tools and system instruction before connecting
   useEffect(() => {
     setConfig({
@@ -468,6 +517,135 @@ export function ALOHAControl() {
     if (connected) client.send({ text });
   };
 
+  // ER Bridge API Functions
+  const sendERTask = async (prompt: string) => {
+    setErIsExecuting(true);
+    setErTaskComplete(false);
+    setErSteps([]);
+    setErCurrentTask(prompt);
+    setErCameraImages([]);
+
+    try {
+      const res = await fetch(`${ER_BRIDGE_ENDPOINT}/robotics-er-request`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt }),
+      });
+
+      const data: ERResponse = await res.json();
+
+      if (!data.success) {
+        console.error('ER Bridge error:', data.error);
+        setErIsExecuting(false);
+        return;
+      }
+
+      setErConversationId(data.conversation_id);
+
+      // Add step to history
+      const newStep: ERStep = {
+        step: data.step,
+        reasoning: data.reasoning,
+        action: data.next_action,
+        result: data.execution_result,
+        verification: data.verification_check,
+        images: data.images,
+        timestamp: new Date().toLocaleTimeString(),
+      };
+      setErSteps([newStep]);
+
+      // Update camera images
+      if (data.images && data.images.length > 0) {
+        setErCameraImages(data.images);
+      }
+
+      // Check if task is complete
+      if (data.task_complete) {
+        setErTaskComplete(true);
+        setErIsExecuting(false);
+        setErConversationId(null);
+      } else if (data.execution_result) {
+        // Auto-continue with feedback
+        await sendERFeedback(data.conversation_id, data.execution_result);
+      } else {
+        setErIsExecuting(false);
+      }
+    } catch (e: any) {
+      console.error('ER Bridge fetch error:', e?.message || e);
+      setErIsExecuting(false);
+    }
+  };
+
+  const sendERFeedback = async (conversationId: string, executionResult: ERExecutionResult) => {
+    try {
+      const res = await fetch(`${ER_BRIDGE_ENDPOINT}/robotics-er-request`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          conversation_id: conversationId,
+          execution_result: executionResult,
+        }),
+      });
+
+      const data: ERResponse = await res.json();
+
+      if (!data.success) {
+        console.error('ER Bridge feedback error:', data.error);
+        setErIsExecuting(false);
+        return;
+      }
+
+      // Add step to history
+      const newStep: ERStep = {
+        step: data.step,
+        reasoning: data.reasoning,
+        action: data.next_action,
+        result: data.execution_result,
+        verification: data.verification_check,
+        images: data.images,
+        timestamp: new Date().toLocaleTimeString(),
+      };
+      setErSteps(prev => [...prev, newStep]);
+
+      // Update camera images
+      if (data.images && data.images.length > 0) {
+        setErCameraImages(data.images);
+      }
+
+      // Check if task is complete
+      if (data.task_complete) {
+        setErTaskComplete(true);
+        setErIsExecuting(false);
+        setErConversationId(null);
+      } else if (data.execution_result) {
+        // Auto-continue with feedback (recursive)
+        await sendERFeedback(data.conversation_id, data.execution_result);
+      } else {
+        setErIsExecuting(false);
+      }
+    } catch (e: any) {
+      console.error('ER Bridge feedback fetch error:', e?.message || e);
+      setErIsExecuting(false);
+    }
+  };
+
+  const handleERTaskSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!erTaskInput.trim() || erIsExecuting) return;
+
+    const task = erTaskInput.trim();
+    setErTaskInput('');
+    await sendERTask(task);
+  };
+
+  const clearERHistory = () => {
+    setErSteps([]);
+    setErConversationId(null);
+    setErTaskComplete(false);
+    setErCurrentTask('');
+    setErCameraImages([]);
+  };
+
   // Calculate gripper percentage for display
   const gripperPercent = (gripperState.position_normalized || 0) * 100;
   
@@ -537,6 +715,176 @@ export function ALOHAControl() {
         </div>
       </div>
 
+
+      {/* ER Bridge Task Input */}
+      <div style={{ background: '#111827', padding: 12, borderRadius: 6, marginBottom: 12 }}>
+        <h4 style={{ margin: '0 0 8px 0' }}>Gemini ER Task Input</h4>
+        <form onSubmit={handleERTaskSubmit} style={{ display: 'flex', gap: 8 }}>
+          <input
+            type="text"
+            value={erTaskInput}
+            onChange={(e) => setErTaskInput(e.target.value)}
+            placeholder="Enter task (e.g., Pick up the red cube)"
+            disabled={erIsExecuting}
+            style={{
+              flex: 1,
+              padding: '8px 12px',
+              borderRadius: 4,
+              border: '1px solid #374151',
+              background: '#1f2937',
+              color: 'white',
+              fontSize: 14,
+            }}
+          />
+          <button
+            type="submit"
+            disabled={erIsExecuting || !erTaskInput.trim()}
+            style={{
+              padding: '8px 16px',
+              borderRadius: 4,
+              border: 'none',
+              background: erIsExecuting ? '#4b5563' : '#10b981',
+              color: 'white',
+              cursor: erIsExecuting ? 'not-allowed' : 'pointer',
+              fontWeight: 'bold',
+            }}
+          >
+            {erIsExecuting ? 'Running...' : 'Send'}
+          </button>
+        </form>
+        <div style={{ fontSize: 11, opacity: 0.7, marginTop: 4 }}>
+          Bridge: {ER_BRIDGE_ENDPOINT}
+        </div>
+      </div>
+
+      {/* ER Reasoning Display */}
+      {(erSteps.length > 0 || erCurrentTask) && (
+        <div style={{ background: '#111827', padding: 12, borderRadius: 6, marginBottom: 12 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+            <h4 style={{ margin: 0 }}>ER Reasoning</h4>
+            <button
+              onClick={clearERHistory}
+              style={{
+                padding: '4px 8px',
+                fontSize: 11,
+                borderRadius: 4,
+                border: '1px solid #374151',
+                background: 'transparent',
+                color: '#9ca3af',
+                cursor: 'pointer',
+              }}
+            >
+              Clear
+            </button>
+          </div>
+
+          {erCurrentTask && (
+            <div style={{ marginBottom: 8, padding: 8, background: '#1f2937', borderRadius: 4 }}>
+              <strong>Task:</strong> {erCurrentTask}
+              {erTaskComplete && <span style={{ color: '#10b981', marginLeft: 8 }}>Complete</span>}
+              {erIsExecuting && <span style={{ color: '#f59e0b', marginLeft: 8 }}>Executing...</span>}
+            </div>
+          )}
+
+          {/* Camera Images */}
+          {erCameraImages.length > 0 && (
+            <div style={{ marginBottom: 8 }}>
+              <div style={{ fontSize: 12, fontWeight: 'bold', marginBottom: 4 }}>Camera Views</div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                {erCameraImages.map((img, idx) => (
+                  img && (
+                    <div key={idx} style={{ flex: 1 }}>
+                      <div style={{ fontSize: 10, opacity: 0.7, marginBottom: 2 }}>
+                        {idx === 0 ? 'Gripper Cam' : 'Top Cam'}
+                      </div>
+                      <img
+                        src={`data:image/jpeg;base64,${img}`}
+                        alt={idx === 0 ? 'Gripper camera' : 'Top camera'}
+                        style={{
+                          width: '100%',
+                          borderRadius: 4,
+                          border: '1px solid #374151',
+                        }}
+                      />
+                    </div>
+                  )
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Steps History */}
+          <div style={{ maxHeight: 400, overflowY: 'auto' }}>
+            {erSteps.map((step, idx) => (
+              <div
+                key={idx}
+                style={{
+                  marginBottom: 8,
+                  padding: 8,
+                  background: '#1f2937',
+                  borderRadius: 4,
+                  borderLeft: `3px solid ${step.result?.success ? '#10b981' : step.result?.error ? '#ef4444' : '#6366f1'}`,
+                }}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+                  <strong style={{ color: '#6366f1' }}>Step {step.step}</strong>
+                  <span style={{ fontSize: 10, opacity: 0.6 }}>{step.timestamp}</span>
+                </div>
+
+                {/* Reasoning */}
+                <div style={{ marginBottom: 6, fontSize: 13, lineHeight: 1.4 }}>
+                  {step.reasoning}
+                </div>
+
+                {/* Action */}
+                {step.action && (
+                  <div style={{ marginBottom: 4, fontSize: 12 }}>
+                    <span style={{ color: '#f59e0b' }}>Action:</span>{' '}
+                    <code style={{ background: '#374151', padding: '2px 4px', borderRadius: 2 }}>
+                      {step.action.function}
+                    </code>
+                    {Object.keys(step.action.args).length > 0 && (
+                      <pre style={{
+                        margin: '4px 0 0 0',
+                        padding: 4,
+                        background: '#374151',
+                        borderRadius: 2,
+                        fontSize: 10,
+                        overflow: 'auto',
+                      }}>
+                        {JSON.stringify(step.action.args, null, 2)}
+                      </pre>
+                    )}
+                  </div>
+                )}
+
+                {/* Execution Result */}
+                {step.result && (
+                  <div style={{ fontSize: 12 }}>
+                    <span style={{ color: step.result.success ? '#10b981' : '#ef4444' }}>
+                      {step.result.success ? 'Success' : 'Failed'}:
+                    </span>{' '}
+                    {step.result.message || step.result.error}
+                  </div>
+                )}
+
+                {/* Verification */}
+                {step.verification && (
+                  <div style={{ fontSize: 11, opacity: 0.7, marginTop: 4, fontStyle: 'italic' }}>
+                    Verify: {step.verification}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+
+          {erSteps.length === 0 && erIsExecuting && (
+            <div style={{ textAlign: 'center', padding: 16, opacity: 0.6 }}>
+              Waiting for response...
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Manual Control Buttons */}
       <div style={{ marginBottom: 12 }}>
