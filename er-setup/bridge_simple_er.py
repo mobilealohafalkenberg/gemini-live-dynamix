@@ -52,6 +52,7 @@ arm_controller = None
 gripper_controller = None
 camera_controller = None
 robot_model = None
+robot_connected = False  # Track if robot has completed opening ceremony
 
 
 def initialize_robot(port: str = '/dev/ttyDXL', baudrate: int = 1000000) -> bool:
@@ -78,7 +79,8 @@ def initialize_robot(port: str = '/dev/ttyDXL', baudrate: int = 1000000) -> bool
         # Initialize robot model (kinematics)
         print("\n[1/5] Loading robot model...")
         robot_model = VX300S()
-        print(f"  ✓ VX300S model loaded (6-DOF, {robot_model.max_reach}m reach)")
+        robot_info = robot_model.get_info()
+        print(f"  ✓ VX300S model loaded (6-DOF, {robot_info['total_reach']:.2f}m reach)")
 
         # Initialize Dynamixel controller
         print(f"\n[2/5] Connecting to Dynamixel bus at {port}...")
@@ -98,7 +100,7 @@ def initialize_robot(port: str = '/dev/ttyDXL', baudrate: int = 1000000) -> bool
         dynamixel_controller.start_monitoring(frequency=10)
         print(f"  ✓ Dynamixel controller connected, torque enabled, monitoring at 10Hz")
 
-        # Initialize arm controller
+        # Initialize arm controller (without moving to ready position)
         print("\n[3/5] Initializing arm controller...")
         arm_controller = ArmController(
             dynamixel_controller=dynamixel_controller,
@@ -106,17 +108,17 @@ def initialize_robot(port: str = '/dev/ttyDXL', baudrate: int = 1000000) -> bool
             enable_safety=True,
             dry_run=False
         )
-        arm_controller.initialize()
-        print(f"  ✓ Arm controller ready with IK/FK and safety checks")
+        arm_controller.initialize_without_movement()
+        print(f"  ✓ Arm controller ready (awaiting connection for opening ceremony)")
 
-        # Initialize gripper controller
+        # Initialize gripper controller (without auto-close)
         print("\n[4/5] Initializing gripper controller...")
         gripper_controller = GripperController(
             dynamixel_controller=dynamixel_controller,
             dry_run=False
         )
         gripper_controller.initialize()
-        print(f"  ✓ Gripper controller ready (current limited to 300mA)")
+        print(f"  ✓ Gripper controller ready (awaiting connection)")
 
         # Initialize camera controller
         print("\n[5/5] Initializing camera controller...")
@@ -125,7 +127,8 @@ def initialize_robot(port: str = '/dev/ttyDXL', baudrate: int = 1000000) -> bool
         print(f"  ✓ Camera controller ready (gripper_cam + top_cam)")
 
         print("\n" + "=" * 60)
-        print("[ER Bridge] ✓ Robot initialization complete!")
+        print("[ER Bridge] ✓ Robot hardware initialized!")
+        print("[ER Bridge] ℹ️  Use /robot/connect to perform opening ceremony")
         print("=" * 60 + "\n")
 
         return True
@@ -438,9 +441,9 @@ async def handle_initial(data: dict, request_start_time: float) -> web.Response:
     }
 
     workspace_bounds = robot_model.workspace_limits if robot_model else {
-        'x': [0.1, 0.6],
-        'y': [-0.3, 0.3],
-        'z': [0.05, 0.55]
+        'x': (0.15, 0.50),
+        'y': (-0.30, 0.30),
+        'z': (0.05, 0.40)
     }
 
     robot_base = [0, 0, 0]
@@ -1096,8 +1099,229 @@ async def handle_status(request: web.Request) -> web.Response:
         'mode': 'iterative_with_visual_verification',
         'active_conversations': len(conversations),
         'api_key_set': bool(os.getenv('GEMINI_API_KEY')),
-        'robot_initialized': robot_initialized
+        'robot_initialized': robot_initialized,
+        'robot_connected': robot_connected
     })
+
+
+async def handle_robot_connect(request: web.Request) -> web.Response:
+    """
+    Connect to robot and perform opening ceremony.
+
+    This moves the arm slowly to ready position and prepares the gripper.
+    Should be called when user clicks "Connect Robot" button.
+    """
+    global robot_connected
+
+    if not dynamixel_controller:
+        return web.json_response({
+            'success': False,
+            'error': 'Robot hardware not initialized'
+        }, status=500)
+
+    if robot_connected:
+        return web.json_response({
+            'success': False,
+            'error': 'Robot already connected',
+            'state': 'connected'
+        }, status=400)
+
+    try:
+        print("\n" + "=" * 60)
+        print("[ER Bridge] 🎬 OPENING CEREMONY - Connecting Robot")
+        print("=" * 60)
+
+        # Perform opening ceremony (move arm to ready position slowly)
+        print("\n[Opening Ceremony] Moving arm to ready position...")
+        ceremony_result = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: arm_controller.opening_ceremony(moving_time=4.0, blocking=True)
+        )
+
+        if not ceremony_result.get('success'):
+            error_msg = ceremony_result.get('error', 'Opening ceremony failed')
+            print(f"[Opening Ceremony] ✗ Failed: {error_msg}")
+            return web.json_response({
+                'success': False,
+                'error': error_msg,
+                'state': 'disconnected'
+            }, status=500)
+
+        # Open gripper to neutral position
+        print("[Opening Ceremony] Opening gripper...")
+        gripper_result = await asyncio.get_event_loop().run_in_executor(
+            None,
+            gripper_controller.open_gripper
+        )
+
+        robot_connected = True
+
+        print("\n" + "=" * 60)
+        print("[ER Bridge] ✓ Opening ceremony complete - Robot ready!")
+        print("=" * 60 + "\n")
+
+        # Get current state
+        arm_state = arm_controller.get_arm_state()
+        gripper_state = gripper_controller.get_gripper_state()
+
+        return web.json_response({
+            'success': True,
+            'state': 'connected',
+            'message': 'Robot connected and ready',
+            'arm_state': arm_state,
+            'gripper_state': gripper_state
+        })
+
+    except Exception as e:
+        print(f"[ER Bridge] ✗ Opening ceremony error: {e}")
+        import traceback
+        traceback.print_exc()
+        return web.json_response({
+            'success': False,
+            'error': str(e),
+            'state': 'disconnected'
+        }, status=500)
+
+
+async def handle_robot_disconnect(request: web.Request) -> web.Response:
+    """
+    Disconnect from robot and perform closing ceremony.
+
+    This moves the arm slowly to sleep position and keeps torque ON
+    so the arm holds its position safely.
+    Should be called when user clicks "Disconnect Robot" button.
+    """
+    global robot_connected
+
+    if not dynamixel_controller:
+        return web.json_response({
+            'success': False,
+            'error': 'Robot hardware not initialized'
+        }, status=500)
+
+    if not robot_connected:
+        return web.json_response({
+            'success': False,
+            'error': 'Robot not connected',
+            'state': 'disconnected'
+        }, status=400)
+
+    try:
+        print("\n" + "=" * 60)
+        print("[ER Bridge] 🎬 CLOSING CEREMONY - Disconnecting Robot")
+        print("=" * 60)
+
+        # Close gripper first
+        print("\n[Closing Ceremony] Closing gripper...")
+        await asyncio.get_event_loop().run_in_executor(
+            None,
+            gripper_controller.close_gripper
+        )
+
+        # Perform closing ceremony (move arm to sleep position slowly)
+        print("[Closing Ceremony] Moving arm to sleep position...")
+        ceremony_result = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: arm_controller.closing_ceremony(moving_time=4.0, blocking=True)
+        )
+
+        if not ceremony_result.get('success'):
+            error_msg = ceremony_result.get('error', 'Closing ceremony failed')
+            print(f"[Closing Ceremony] ✗ Failed: {error_msg}")
+            return web.json_response({
+                'success': False,
+                'error': error_msg,
+                'state': 'connected'
+            }, status=500)
+
+        robot_connected = False
+
+        print("\n" + "=" * 60)
+        print("[ER Bridge] ✓ Closing ceremony complete - Robot in sleep position")
+        print("[ER Bridge] ℹ️  Torque remains ON to hold position safely")
+        print("=" * 60 + "\n")
+
+        # Get final state
+        arm_state = arm_controller.get_arm_state()
+        gripper_state = gripper_controller.get_gripper_state()
+
+        return web.json_response({
+            'success': True,
+            'state': 'disconnected',
+            'message': 'Robot disconnected - arm in sleep position with torque on',
+            'arm_state': arm_state,
+            'gripper_state': gripper_state
+        })
+
+    except Exception as e:
+        print(f"[ER Bridge] ✗ Closing ceremony error: {e}")
+        import traceback
+        traceback.print_exc()
+        return web.json_response({
+            'success': False,
+            'error': str(e),
+            'state': 'connected'
+        }, status=500)
+
+
+async def handle_robot_status(request: web.Request) -> web.Response:
+    """
+    Get current robot connection status and state.
+    """
+    if not dynamixel_controller:
+        return web.json_response({
+            'connected': False,
+            'initialized': False,
+            'error': 'Robot hardware not initialized'
+        })
+
+    try:
+        # Get current states
+        arm_state = arm_controller.get_arm_state() if arm_controller else None
+        gripper_state = gripper_controller.get_gripper_state() if gripper_controller else None
+
+        return web.json_response({
+            'connected': robot_connected,
+            'initialized': True,
+            'arm_state': arm_state,
+            'gripper_state': gripper_state
+        })
+
+    except Exception as e:
+        return web.json_response({
+            'connected': robot_connected,
+            'initialized': True,
+            'error': str(e)
+        })
+
+
+async def handle_camera_frame(request: web.Request) -> web.Response:
+    """Get a frame from a specific camera."""
+    global camera_controller
+
+    camera_name = request.match_info.get('camera_name', 'gripper_cam')
+
+    if not camera_controller or not camera_controller.initialized:
+        return web.json_response({
+            'success': False,
+            'error': 'Camera controller not initialized'
+        }, status=503)
+
+    # Get frame as base64 JPEG
+    frame_b64 = camera_controller.get_frame_base64(camera_name)
+
+    if frame_b64:
+        return web.json_response({
+            'success': True,
+            'camera': camera_name,
+            'frame': frame_b64,
+            'format': 'jpeg_base64'
+        })
+    else:
+        return web.json_response({
+            'success': False,
+            'error': f'No frame available from {camera_name}'
+        }, status=404)
 
 
 async def on_cleanup(app):
@@ -1123,6 +1347,12 @@ def make_app() -> web.Application:
     # Add routes
     app.router.add_post('/robotics-er-request', handle_er_request)
     app.router.add_get('/status', handle_status)
+    app.router.add_post('/robot/connect', handle_robot_connect)
+    app.router.add_post('/robot/disconnect', handle_robot_disconnect)
+    app.router.add_get('/robot/status', handle_robot_status)
+
+    # Camera endpoints (for frontend compatibility)
+    app.router.add_get('/camera/{camera_name}/frame', handle_camera_frame)
 
     # Add CORS to routes
     for route in list(app.router.routes()):
@@ -1176,6 +1406,9 @@ if __name__ == '__main__':
     print("      Initial: {prompt}")
     print("      Feedback: {conversation_id, execution_result}")
     print("  - GET /status")
+    print("  - POST /robot/connect     (opening ceremony)")
+    print("  - POST /robot/disconnect  (closing ceremony)")
+    print("  - GET  /robot/status")
     print()
 
     try:

@@ -77,11 +77,11 @@ class ArmController:
         'ready': [0.0, -0.96, 1.16, 0.0, -0.3, 0.0],  # START_ARM_POSE[:6]
     }
     
-    # Workspace limits (meters)
+    # Workspace limits (meters) - matches VX300S model
     WORKSPACE = {
-        'x': (-0.5, 0.5),
-        'y': (-0.5, 0.5),
-        'z': (0.1, 0.6),  # Minimum z=0.1m to stay above table
+        'x': (0.15, 0.50),   # Forward reach only - cannot reach behind base
+        'y': (-0.30, 0.30),  # Left-right reach
+        'z': (0.05, 0.40),   # Vertical reach above table
     }
     
     # Safety constraints to prevent self-collision
@@ -743,9 +743,121 @@ class ArmController:
         if result['success']:
             with self.state_lock:
                 self.current_state = target_state
-        
+
         return result
-    
+
+    def opening_ceremony(self, moving_time: float = 4.0, blocking: bool = True) -> Dict:
+        """
+        Perform opening ceremony - slow, deliberate movement to ready position.
+
+        This is intended to be called when establishing connection with the robot,
+        providing a safe and predictable startup sequence.
+
+        Args:
+            moving_time: Time for the movement (default 4.0 seconds for safety)
+            blocking: Wait for movement to complete
+
+        Returns:
+            Status dictionary with ceremony result
+        """
+        if not self.initialized:
+            return {"success": False, "error": "Not initialized", "state": "unknown"}
+
+        print(f"[ArmController] 🎬 Starting opening ceremony (moving to ready in {moving_time}s)")
+
+        # Move slowly to ready position
+        result = self.move_to_pose('ready', moving_time=moving_time, blocking=blocking)
+
+        if result.get('success'):
+            print("[ArmController] ✓ Opening ceremony complete - arm is ready")
+        else:
+            print(f"[ArmController] ✗ Opening ceremony failed: {result.get('error')}")
+
+        return result
+
+    def closing_ceremony(self, moving_time: float = 4.0, blocking: bool = True) -> Dict:
+        """
+        Perform closing ceremony - slow, deliberate movement to sleep position.
+
+        IMPORTANT: This keeps torque ON so the arm holds its sleep position safely.
+        This prevents the arm from falling and potentially breaking.
+
+        Args:
+            moving_time: Time for the movement (default 4.0 seconds for safety)
+            blocking: Wait for movement to complete
+
+        Returns:
+            Status dictionary with ceremony result
+        """
+        if not self.initialized:
+            return {"success": False, "error": "Not initialized", "state": "unknown"}
+
+        print(f"[ArmController] 🎬 Starting closing ceremony (moving to sleep in {moving_time}s)")
+
+        # Move slowly to sleep position
+        result = self.move_to_pose('sleep', moving_time=moving_time, blocking=blocking)
+
+        if result.get('success'):
+            print("[ArmController] ✓ Closing ceremony complete - arm is in sleep position")
+            print("[ArmController] ℹ️ Torque remains ON to hold position safely")
+        else:
+            print(f"[ArmController] ✗ Closing ceremony failed: {result.get('error')}")
+
+        return result
+
+    def initialize_without_movement(self) -> bool:
+        """
+        Initialize robot connection WITHOUT moving to ready position.
+
+        This is useful for delayed initialization where you want to control
+        when the opening ceremony happens (e.g., from frontend connect button).
+
+        Returns:
+            True if successful, False otherwise.
+        """
+        try:
+            print("[ArmController] Initializing arm controller (no movement)...")
+
+            # Verify DynamixelController is provided and initialized
+            if self.dxl is None:
+                print("[ArmController] ✗ No DynamixelController provided")
+                return False
+
+            # Verify DynamixelController is connected
+            if not self.dxl.port_handler or not self.dxl.port_handler.is_open:
+                print("[ArmController] ✗ DynamixelController not connected")
+                return False
+
+            # Enable torque on arm motors
+            print("[ArmController] Enabling torque on arm motors...")
+            arm_motor_ids = [1, 2, 4, 6, 7, 8]  # Skip shadow motors 3, 5 and gripper 9
+            self.dxl.enable_torque(arm_motor_ids)
+
+            # Read current position
+            print("[ArmController] Reading current position...")
+            current_joints = self.dxl.get_joint_positions_radians()
+            if current_joints is None:
+                print("[ArmController] ✗ Failed to read joint positions")
+                return False
+
+            with self.state_lock:
+                self.current_joints = list(current_joints)
+                self.current_state = ArmState.IDLE
+
+            self.initialized = True
+
+            # Start position monitoring thread
+            self._start_position_monitor()
+
+            print("[ArmController] ✓ Initialization complete (awaiting opening ceremony)")
+            return True
+
+        except Exception as e:
+            print(f"[ArmController] ✗ Initialization failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
     def execute_trajectory(self, waypoints: List[Dict], speed: str = 'slow', coordinate_with_gripper=None, blocking: bool = True) -> Dict:
         """
         Execute a multi-waypoint trajectory with optional gripper coordination.

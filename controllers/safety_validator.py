@@ -24,14 +24,14 @@ class WorkspaceBounds:
     """Workspace boundary configuration for the robot
 
     NOTE: These bounds MUST match the WORKSPACE constants in arm_controller.py
-    to ensure consistent safety validation across the system.
+    and the VX300S model to ensure consistent safety validation across the system.
     """
-    x_min: float = -0.50  # meters - matches arm_controller WORKSPACE['x'][0]
-    x_max: float = 0.50   # meters - matches arm_controller WORKSPACE['x'][1]
-    y_min: float = -0.50  # meters - matches arm_controller WORKSPACE['y'][0]
-    y_max: float = 0.50   # meters - matches arm_controller WORKSPACE['y'][1]
-    z_min: float = 0.10   # meters - matches arm_controller WORKSPACE['z'][0] - STAY ABOVE TABLE
-    z_max: float = 0.60   # meters - matches arm_controller WORKSPACE['z'][1]
+    x_min: float = 0.15   # meters - forward reach only, cannot reach behind base
+    x_max: float = 0.50   # meters - maximum forward reach
+    y_min: float = -0.30  # meters - left reach
+    y_max: float = 0.30   # meters - right reach
+    z_min: float = 0.05   # meters - minimum height above table
+    z_max: float = 0.40   # meters - maximum vertical reach
     
     @classmethod
     def from_env(cls):

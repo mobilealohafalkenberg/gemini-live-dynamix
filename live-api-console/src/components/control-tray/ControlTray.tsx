@@ -7,6 +7,9 @@ import { useLiveAPIContext } from "../../contexts/LiveAPIContext";
 import { AudioRecorder } from "../../lib/audio-recorder";
 import "./control-tray.scss";
 
+// Robot endpoint configuration
+const ROBOT_ENDPOINT = process.env.REACT_APP_ROBOT_ENDPOINT || 'http://localhost:8082';
+
 function ControlTray() {
   const { client, connected, connect, disconnect, volume } = useLiveAPIContext();
   const [audioRecorder] = useState(() => new AudioRecorder());
@@ -14,6 +17,10 @@ function ControlTray() {
   const [inVolume, setInVolume] = useState(0);
   const [connecting, setConnecting] = useState(false);
   const [cameraMode, setCameraMode] = useState<'both' | 'gripper' | 'top' | 'merged' | 'none'>('merged');
+
+  // Robot connection state
+  const [robotConnected, setRobotConnected] = useState(false);
+  const [robotConnecting, setRobotConnecting] = useState(false);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -48,6 +55,71 @@ function ControlTray() {
       audioRecorder.stop();
     }
   };
+
+  // Robot connection handling
+  const handleRobotConnect = async () => {
+    setRobotConnecting(true);
+    try {
+      const response = await fetch(`${ROBOT_ENDPOINT}/robot/connect`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      });
+      const data = await response.json();
+
+      if (data.success) {
+        setRobotConnected(true);
+        console.log('🤖 Robot connected:', data.message);
+      } else {
+        console.error('Robot connection failed:', data.error);
+        alert(`Robot connection failed: ${data.error}`);
+      }
+    } catch (error) {
+      console.error('Robot connection error:', error);
+      alert(`Robot connection error: ${error}`);
+    } finally {
+      setRobotConnecting(false);
+    }
+  };
+
+  const handleRobotDisconnect = async () => {
+    setRobotConnecting(true);
+    try {
+      const response = await fetch(`${ROBOT_ENDPOINT}/robot/disconnect`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      });
+      const data = await response.json();
+
+      if (data.success) {
+        setRobotConnected(false);
+        console.log('🤖 Robot disconnected:', data.message);
+      } else {
+        console.error('Robot disconnection failed:', data.error);
+        alert(`Robot disconnection failed: ${data.error}`);
+      }
+    } catch (error) {
+      console.error('Robot disconnection error:', error);
+      alert(`Robot disconnection error: ${error}`);
+    } finally {
+      setRobotConnecting(false);
+    }
+  };
+
+  // Check robot connection status on mount
+  useEffect(() => {
+    const checkRobotStatus = async () => {
+      try {
+        const response = await fetch(`${ROBOT_ENDPOINT}/robot/status`);
+        const data = await response.json();
+        setRobotConnected(data.connected || false);
+      } catch (error) {
+        console.warn('Could not check robot status:', error);
+        setRobotConnected(false);
+      }
+    };
+
+    checkRobotStatus();
+  }, []);
 
   // Helper function to merge two camera frames horizontally with labels
   const mergeFrames = async (gripperB64: string, topB64: string): Promise<string> => {
@@ -111,8 +183,7 @@ function ControlTray() {
     if (!connected || !client || cameraMode === 'none') return;
 
     let timeoutId: number;
-    const ROBOT_ENDPOINT = process.env.REACT_APP_ROBOT_ENDPOINT || 'http://localhost:8081';
-    
+
     const sendRobotCameraFrames = async () => {
       try {
         const framesToSend = [];
@@ -212,7 +283,7 @@ function ControlTray() {
   return (
     <div className="control-tray">
       <div className="control-tray-container">
-        {/* Connection Controls */}
+        {/* Gemini Connection Controls */}
         <div className="control-group">
           {!connected ? (
             <button
@@ -220,14 +291,37 @@ function ControlTray() {
               onClick={handleConnect}
               disabled={connecting}
             >
-              {connecting ? "Connecting..." : "🔌 Connect"}
+              {connecting ? "Connecting..." : "🔌 Connect Gemini"}
             </button>
           ) : (
             <button
               className="control-button disconnect-button"
               onClick={handleDisconnect}
             >
-              ⏹ Disconnect
+              ⏹ Disconnect Gemini
+            </button>
+          )}
+        </div>
+
+        {/* Robot Connection Controls */}
+        <div className="control-group">
+          {!robotConnected ? (
+            <button
+              className="control-button connect-button"
+              onClick={handleRobotConnect}
+              disabled={robotConnecting}
+              style={{ backgroundColor: '#2a5a2a' }}
+            >
+              {robotConnecting ? "🤖 Connecting..." : "🤖 Connect Robot"}
+            </button>
+          ) : (
+            <button
+              className="control-button disconnect-button"
+              onClick={handleRobotDisconnect}
+              disabled={robotConnecting}
+              style={{ backgroundColor: '#5a2a2a' }}
+            >
+              {robotConnecting ? "🤖 Disconnecting..." : "🤖 Disconnect Robot"}
             </button>
           )}
         </div>
@@ -299,6 +393,9 @@ function ControlTray() {
         <div className="status-indicators">
           <span className="status-item">
             Gemini: {connected ? '🟢' : '🔴'}
+          </span>
+          <span className="status-item">
+            Robot: {robotConnected ? '🟢' : '🔴'}
           </span>
           <span className="status-item">
             Audio: {!muted && connected ? '🎤' : '🔇'}

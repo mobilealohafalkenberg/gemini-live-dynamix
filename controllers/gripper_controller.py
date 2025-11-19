@@ -151,16 +151,28 @@ class GripperController:
             print("[GripperController] Enabling gripper torque...")
             self.dxl.enable_torque([self.gripper_motor_id])
 
-            # Close gripper to starting position
-            print("[GripperController] Moving to closed position...")
-            self.close_gripper(blocking=True)
+            # Read current position (don't move to closed automatically)
+            print("[GripperController] Reading current position...")
+            positions = self.dxl.sync_read_positions()
+            if self.gripper_motor_id in positions:
+                dynamixel_pos = positions[self.gripper_motor_id]
+                current_position = self._dynamixel_to_radians(dynamixel_pos)
+                with self.state_lock:
+                    self.gripper_position = current_position
+                    # Determine initial state based on position
+                    if current_position >= self.OPEN_THRESHOLD:
+                        self.current_state = GripperState.OPEN
+                    elif current_position <= self.CLOSE_THRESHOLD:
+                        self.current_state = GripperState.CLOSED
+                    else:
+                        self.current_state = GripperState.UNKNOWN
 
             self.initialized = True
 
             # Start position monitoring thread
             self._start_position_monitor()
 
-            print("[GripperController] ✓ Initialization complete")
+            print("[GripperController] ✓ Initialization complete (no automatic movement)")
             return True
 
         except Exception as e:
