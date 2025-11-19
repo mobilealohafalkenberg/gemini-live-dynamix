@@ -3,7 +3,6 @@
  * Stripped down to essentials - just gripper control via Gemini Live API
  */
 
-import { useRef, useState } from "react";
 import "./App.scss";
 import { LiveAPIProvider } from "./contexts/LiveAPIContext";
 import { ALOHAControl } from "./components/aloha-control/ALOHAControl";
@@ -21,9 +20,6 @@ const apiOptions: LiveClientOptions = {
 };
 
 function App() {
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const [videoStream, setVideoStream] = useState<MediaStream | null>(null);
-
   return (
     <div className="App">
       <LiveAPIProvider options={apiOptions}>
@@ -33,33 +29,16 @@ function App() {
               <h1 style={{ color: 'white', textAlign: 'center', margin: '20px 0' }}>
                 🤖 ALOHA Gripper Control
               </h1>
-              
+
               {/* Main gripper control component */}
               <ALOHAControl />
-              
+
               {/* Robot camera feeds */}
               <DualCameraView enabled={true} />
-              
-              {/* Video stream (for webcam if needed) */}
-              <video
-                className="stream"
-                ref={videoRef}
-                autoPlay
-                playsInline
-                style={{ 
-                  display: videoStream ? 'block' : 'none',
-                  maxWidth: '400px',
-                  margin: '20px auto',
-                  borderRadius: '8px'
-                }}
-              />
             </div>
 
             {/* Control tray with voice and connection controls */}
-            <ControlTray
-              videoRef={videoRef}
-              onVideoStreamChange={setVideoStream}
-            />
+            <ControlTray />
           </main>
         </div>
       </LiveAPIProvider>

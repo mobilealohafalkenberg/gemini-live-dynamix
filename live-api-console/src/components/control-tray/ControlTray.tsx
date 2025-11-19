@@ -7,15 +7,9 @@ import { useLiveAPIContext } from "../../contexts/LiveAPIContext";
 import { AudioRecorder } from "../../lib/audio-recorder";
 import "./control-tray.scss";
 
-type ControlTrayProps = {
-  videoRef: React.RefObject<HTMLVideoElement>;
-  onVideoStreamChange?: (stream: MediaStream | null) => void;
-};
-
-function ControlTray({ videoRef, onVideoStreamChange }: ControlTrayProps) {
+function ControlTray() {
   const { client, connected, connect, disconnect, volume } = useLiveAPIContext();
   const [audioRecorder] = useState(() => new AudioRecorder());
-  const [videoStream, setVideoStream] = useState<MediaStream | null>(null);
   const [muted, setMuted] = useState(false);
   const [inVolume, setInVolume] = useState(0);
   const [connecting, setConnecting] = useState(false);
@@ -39,24 +33,8 @@ function ControlTray({ videoRef, onVideoStreamChange }: ControlTrayProps) {
   const handleConnect = async () => {
     setConnecting(true);
     try {
-      // Start video stream
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: true,
-        audio: false
-      });
-      setVideoStream(stream);
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-      }
-      onVideoStreamChange?.(stream);
-
       // Connect to Gemini
       await connect();
-
-      // Send video stream if available
-      if (stream && client) {
-        await client.sendMedia({ video: stream });
-      }
     } catch (error) {
       console.error("Connection failed:", error);
     } finally {
@@ -66,14 +44,6 @@ function ControlTray({ videoRef, onVideoStreamChange }: ControlTrayProps) {
 
   const handleDisconnect = async () => {
     await disconnect();
-    if (videoStream) {
-      videoStream.getTracks().forEach(track => track.stop());
-      setVideoStream(null);
-    }
-    if (videoRef.current) {
-      videoRef.current.srcObject = null;
-    }
-    onVideoStreamChange?.(null);
     if (audioRecorder) {
       audioRecorder.stop();
     }
@@ -328,10 +298,7 @@ function ControlTray({ videoRef, onVideoStreamChange }: ControlTrayProps) {
         {/* Status Indicators */}
         <div className="status-indicators">
           <span className="status-item">
-            Bridge: {connected ? '🟢' : '🔴'}
-          </span>
-          <span className="status-item">
-            Video: {videoStream ? '📹' : '❌'}
+            Gemini: {connected ? '🟢' : '🔴'}
           </span>
           <span className="status-item">
             Audio: {!muted && connected ? '🎤' : '🔇'}
