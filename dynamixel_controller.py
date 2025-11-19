@@ -44,13 +44,13 @@ class DynamixelController:
     # Dynamixel Protocol Version
     PROTOCOL_VERSION = 2.0
 
-    def __init__(self, port: str = '/dev/ttyDXL', baudrate: int = 1000000,
+    def __init__(self, port: str = '/dev/ttyDXL_follower_right', baudrate: int = 1000000,
                  config_file: Optional[str] = None):
         """
         Initialize Dynamixel controller.
 
         Args:
-            port: Serial port device (e.g., '/dev/ttyDXL', '/dev/ttyUSB0')
+            port: Serial port device (e.g., '/dev/ttyDXL_follower_right', '/dev/ttyUSB0')
             baudrate: Communication baudrate (default 1Mbps)
             config_file: Path to YAML configuration file
         """

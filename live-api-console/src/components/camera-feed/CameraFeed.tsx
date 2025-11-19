@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef } from 'react';
 
-const ROBOT_ENDPOINT = process.env.REACT_APP_ROBOT_ENDPOINT || 'http://localhost:8081';
+const ROBOT_ENDPOINT = process.env.REACT_APP_ROBOT_ENDPOINT || 'http://localhost:8082';
 
 interface CameraFeedProps {
   cameraName: string;
@@ -8,14 +8,16 @@ interface CameraFeedProps {
   width?: number;
   height?: number;
   refreshRate?: number;
+  robotConnected?: boolean;
 }
 
-export function CameraFeed({ 
-  cameraName, 
-  title, 
-  width = 320, 
+export function CameraFeed({
+  cameraName,
+  title,
+  width = 320,
   height = 240,
-  refreshRate = 100  // milliseconds between frame updates
+  refreshRate = 100,  // milliseconds between frame updates
+  robotConnected = true  // default to true for backwards compatibility
 }: CameraFeedProps) {
   const [imageUrl, setImageUrl] = useState<string>('');
   const [isLoading, setIsLoading] = useState(true);
@@ -24,6 +26,14 @@ export function CameraFeed({
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
+    // Only poll when robot is connected
+    if (!robotConnected) {
+      setIsLoading(true);
+      setImageUrl('');
+      setError('');
+      return;
+    }
+
     let mounted = true;
 
     const fetchFrame = async () => {
@@ -74,7 +84,7 @@ export function CameraFeed({
         clearInterval(intervalRef.current);
       }
     };
-  }, [cameraName, refreshRate, width, height]);
+  }, [cameraName, refreshRate, width, height, robotConnected]);
 
   return (
     <div style={{ 
@@ -89,10 +99,25 @@ export function CameraFeed({
         📹 {title}
       </h4>
       
-      {isLoading && !imageUrl && (
-        <div style={{ 
-          width, 
-          height, 
+      {!robotConnected && (
+        <div style={{
+          width,
+          height,
+          background: '#374151',
+          borderRadius: 4,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          color: '#9ca3af'
+        }}>
+          Waiting for robot connection...
+        </div>
+      )}
+
+      {robotConnected && isLoading && !imageUrl && (
+        <div style={{
+          width,
+          height,
           background: '#374151',
           borderRadius: 4,
           display: 'flex',
@@ -104,10 +129,10 @@ export function CameraFeed({
         </div>
       )}
       
-      {error && (
-        <div style={{ 
-          width, 
-          height, 
+      {robotConnected && error && (
+        <div style={{
+          width,
+          height,
           background: '#374151',
           borderRadius: 4,
           display: 'flex',
@@ -118,11 +143,11 @@ export function CameraFeed({
           padding: 8,
           textAlign: 'center'
         }}>
-          ❌ {error}
+          {error}
         </div>
       )}
-      
-      {imageUrl && !error && (
+
+      {robotConnected && imageUrl && !error && (
         <>
           <img
             src={imageUrl}
@@ -160,13 +185,14 @@ export function CameraFeed({
 
 interface DualCameraViewProps {
   enabled?: boolean;
+  robotConnected?: boolean;
 }
 
-export function DualCameraView({ enabled = true }: DualCameraViewProps) {
+export function DualCameraView({ enabled = true, robotConnected = true }: DualCameraViewProps) {
   const [cameraInfo, setCameraInfo] = useState<any>(null);
 
   useEffect(() => {
-    if (!enabled) return;
+    if (!enabled || !robotConnected) return;
 
     // Fetch camera info
     fetch(`${ROBOT_ENDPOINT}/camera/info`)
@@ -177,7 +203,7 @@ export function DualCameraView({ enabled = true }: DualCameraViewProps) {
         }
       })
       .catch(err => console.error('Failed to fetch camera info:', err));
-  }, [enabled]);
+  }, [enabled, robotConnected]);
 
   if (!enabled) {
     return (
@@ -213,9 +239,9 @@ export function DualCameraView({ enabled = true }: DualCameraViewProps) {
         </p>
       )}
       
-      <div style={{ 
-        display: 'flex', 
-        flexWrap: 'wrap', 
+      <div style={{
+        display: 'flex',
+        flexWrap: 'wrap',
         gap: 8,
         justifyContent: 'center'
       }}>
@@ -225,6 +251,7 @@ export function DualCameraView({ enabled = true }: DualCameraViewProps) {
           width={320}
           height={240}
           refreshRate={100}
+          robotConnected={robotConnected}
         />
         <CameraFeed
           cameraName="top_cam"
@@ -232,6 +259,7 @@ export function DualCameraView({ enabled = true }: DualCameraViewProps) {
           width={320}
           height={240}
           refreshRate={100}
+          robotConnected={robotConnected}
         />
       </div>
       

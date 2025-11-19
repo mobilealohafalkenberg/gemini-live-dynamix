@@ -115,6 +115,18 @@ class CameraController:
                     # ← NEW: Create align object to align depth to color
                     align = rs.align(rs.stream.color)
 
+                    # Prime the pipeline by waiting for a few frames (RealSense needs this)
+                    print(f"[CameraController] Warming up {name}...")
+                    for i in range(5):
+                        try:
+                            frames = pipeline.wait_for_frames(timeout_ms=5000)
+                            if frames:
+                                print(f"[CameraController] {name} primed successfully")
+                                break
+                        except Exception as e:
+                            if i == 4:  # Last attempt
+                                print(f"[CameraController] Warning: {name} warmup incomplete: {e}")
+
                     # Store references
                     self.pipelines[name] = pipeline
                     self.configs[name] = config
@@ -191,6 +203,11 @@ class CameraController:
 
     def start_capture_threads(self):
         """Start capture threads for each camera"""
+        # Wait for cameras to warm up before starting capture loops
+        # RealSense cameras need a brief period after pipeline.start() before frames are available
+        print("[CameraController] Waiting for cameras to warm up...")
+        time.sleep(1.0)  # Give cameras time to start streaming
+
         for name in self.pipelines.keys():
             thread = threading.Thread(
                 target=self.capture_loop,
@@ -199,6 +216,8 @@ class CameraController:
             )
             thread.start()
             self.capture_threads[name] = thread
+
+        print("[CameraController] Capture threads started")
 
     def capture_loop(self, camera_name: str):
         """
@@ -209,6 +228,8 @@ class CameraController:
             camera_name: Name of the camera to capture from
         """
         pipeline = self.pipelines[camera_name]
+        consecutive_errors = 0
+        max_consecutive_errors = 5  # Only log after multiple failures
 
         while self.running:
             try:
@@ -217,8 +238,9 @@ class CameraController:
                     # RealSense camera - RGB + Depth
                     # ═══════════════════════════════════════════════════
 
-                    # Wait for frames
-                    frames = pipeline.wait_for_frames(timeout_ms=1000)
+                    # Wait for frames with extended timeout
+                    frames = pipeline.wait_for_frames(timeout_ms=3000)
+                    consecutive_errors = 0  # Reset error counter on success
 
                     # ← NEW: Align depth to color for accurate correspondence
                     if camera_name in self.align_objects:
@@ -264,8 +286,12 @@ class CameraController:
                             self.depth_frames[camera_name] = None
 
             except Exception as e:
+                consecutive_errors += 1
                 if self.running:  # Only print if we're still supposed to be running
-                    print(f"[CameraController] Capture error on {camera_name}: {e}")
+                    # Only log after multiple consecutive errors to avoid flooding the console
+                    if consecutive_errors >= max_consecutive_errors:
+                        print(f"[CameraController] Capture error on {camera_name}: {e} (after {consecutive_errors} attempts)")
+                        consecutive_errors = 0  # Reset to allow next batch of errors
                 time.sleep(0.1)
 
     def get_frame(self, camera_name: str) -> Optional[np.ndarray]:

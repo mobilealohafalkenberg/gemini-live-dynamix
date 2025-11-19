@@ -179,8 +179,9 @@ function ControlTray() {
   };
 
   // Send robot camera frames periodically based on selected mode
+  // Only poll cameras when both Gemini is connected AND robot is connected
   useEffect(() => {
-    if (!connected || !client || cameraMode === 'none') return;
+    if (!connected || !client || cameraMode === 'none' || !robotConnected) return;
 
     let timeoutId: number;
 
@@ -254,7 +255,7 @@ function ControlTray() {
         clearTimeout(timeoutId);
       }
     };
-  }, [connected, client, cameraMode]);
+  }, [connected, client, cameraMode, robotConnected]);
 
   // Handle audio recording
   useEffect(() => {

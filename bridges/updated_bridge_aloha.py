@@ -20,6 +20,7 @@ import sys
 import time
 import os
 import uuid
+import numpy as np
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional

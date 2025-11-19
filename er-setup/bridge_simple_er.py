@@ -1324,6 +1324,24 @@ async def handle_camera_frame(request: web.Request) -> web.Response:
         }, status=404)
 
 
+async def handle_camera_info(request: web.Request) -> web.Response:
+    """Get camera initialization status."""
+    global camera_controller
+
+    if not camera_controller:
+        return web.json_response({
+            'success': False,
+            'initialized': False,
+            'error': 'Camera controller not created'
+        })
+
+    return web.json_response({
+        'success': True,
+        'initialized': camera_controller.initialized,
+        'cameras': ['gripper_cam', 'top_cam'] if camera_controller.initialized else []
+    })
+
+
 async def on_cleanup(app):
     """Cleanup handler for graceful shutdown."""
     print("\n[ER Bridge] Application shutting down...")
@@ -1352,6 +1370,7 @@ def make_app() -> web.Application:
     app.router.add_get('/robot/status', handle_robot_status)
 
     # Camera endpoints (for frontend compatibility)
+    app.router.add_get('/camera/info', handle_camera_info)
     app.router.add_get('/camera/{camera_name}/frame', handle_camera_frame)
 
     # Add CORS to routes
@@ -1369,7 +1388,7 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description='Gemini Robotics ER Bridge with Dynamixel Control')
     parser.add_argument('--port', type=int, default=8082, help='Server port (default: 8082)')
-    parser.add_argument('--dxl-port', type=str, default='/dev/ttyDXL', help='Dynamixel serial port')
+    parser.add_argument('--dxl-port', type=str, default='/dev/ttyDXL_follower_right', help='Dynamixel serial port (follower right arm)')
     parser.add_argument('--baudrate', type=int, default=1000000, help='Dynamixel baudrate')
     parser.add_argument('--no-robot', action='store_true', help='Run without robot hardware (for testing)')
     args = parser.parse_args()
