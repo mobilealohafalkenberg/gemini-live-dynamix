@@ -182,7 +182,11 @@ class GripperController:
             return False
     
     def _start_position_monitor(self):
-        """Start background thread to monitor gripper position"""
+        """Start background thread to monitor gripper position.
+
+        Uses cached state from DynamixelController to avoid port contention.
+        The DynamixelController's monitoring thread handles the actual serial reads.
+        """
         # Dry-run mode: Skip monitoring thread (position is set manually)
         if self.dry_run:
             print("[GripperController] 🔧 DRY-RUN: Skipping position monitor thread")
@@ -191,13 +195,13 @@ class GripperController:
         def monitor():
             while self.initialized:
                 try:
-                    # Read gripper position from DynamixelController
-                    positions = self.dxl.sync_read_positions()
-                    if self.gripper_motor_id not in positions:
+                    # Get cached gripper position from DynamixelController
+                    # This does NOT access the serial port - it reads from cached state
+                    dynamixel_pos = self.dxl.get_cached_gripper_position()
+                    if dynamixel_pos is None:
                         self.monitor_failure_count += 1
+                        time.sleep(0.1)
                         continue
-
-                    dynamixel_pos = positions[self.gripper_motor_id]
 
                     # Convert to radians
                     position = self._dynamixel_to_radians(dynamixel_pos)

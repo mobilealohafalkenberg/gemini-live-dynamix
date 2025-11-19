@@ -206,14 +206,19 @@ class ArmController:
             return False
     
     def _start_position_monitor(self):
-        """Start background thread to monitor arm position"""
+        """Start background thread to monitor arm position.
+
+        Uses cached state from DynamixelController to avoid port contention.
+        The DynamixelController's monitoring thread handles the actual serial reads.
+        """
         def monitor():
             while self.initialized:
                 try:
-                    # Get current joint positions from DynamixelController
-                    joints = self.dxl.get_joint_positions_radians()
+                    # Get cached joint positions from DynamixelController
+                    # This does NOT access the serial port - it reads from cached state
+                    joints = self.dxl.get_cached_joint_radians()
 
-                    if joints is not None:
+                    if joints is not None and len(joints) == 6:
                         # Compute forward kinematics to get end effector pose
                         ee_pose = mr.FKinSpace(self.model.M, self.model.Slist, joints)
 

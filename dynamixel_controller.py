@@ -71,6 +71,10 @@ class DynamixelController:
         self.current_positions_rad = np.zeros(6)  # Joint angles in radians
         self.state_lock = threading.Lock()
 
+        # Port access lock - CRITICAL: All serial I/O must acquire this lock
+        # The Dynamixel SDK PortHandler is NOT thread-safe
+        self.port_lock = threading.Lock()
+
         # Monitoring thread
         self.monitoring_thread = None
         self.monitoring_active = False
@@ -209,28 +213,29 @@ class DynamixelController:
         Returns:
             True if successful
         """
-        if size == 1:
-            result, error = self.packet_handler.write1ByteTxRx(
-                self.port_handler, motor_id, address, value)
-        elif size == 2:
-            result, error = self.packet_handler.write2ByteTxRx(
-                self.port_handler, motor_id, address, value)
-        elif size == 4:
-            result, error = self.packet_handler.write4ByteTxRx(
-                self.port_handler, motor_id, address, value)
-        else:
-            raise ValueError(f"Invalid size: {size}")
+        with self.port_lock:
+            if size == 1:
+                result, error = self.packet_handler.write1ByteTxRx(
+                    self.port_handler, motor_id, address, value)
+            elif size == 2:
+                result, error = self.packet_handler.write2ByteTxRx(
+                    self.port_handler, motor_id, address, value)
+            elif size == 4:
+                result, error = self.packet_handler.write4ByteTxRx(
+                    self.port_handler, motor_id, address, value)
+            else:
+                raise ValueError(f"Invalid size: {size}")
 
-        if result != COMM_SUCCESS:
-            print(f"[DynamixelController] Write error: {self.packet_handler.getTxRxResult(result)}")
-            return False
+            if result != COMM_SUCCESS:
+                print(f"[DynamixelController] Write error: {self.packet_handler.getTxRxResult(result)}")
+                return False
 
-        if error != 0:
-            print(f"[DynamixelController] Motor {motor_id} error: "
-                  f"{self.packet_handler.getRxPacketError(error)}")
-            return False
+            if error != 0:
+                print(f"[DynamixelController] Motor {motor_id} error: "
+                      f"{self.packet_handler.getRxPacketError(error)}")
+                return False
 
-        return True
+            return True
 
     def read_register(self, motor_id: int, address: int, size: int) -> Optional[int]:
         """
@@ -244,22 +249,23 @@ class DynamixelController:
         Returns:
             Value or None if error
         """
-        if size == 1:
-            value, result, error = self.packet_handler.read1ByteTxRx(
-                self.port_handler, motor_id, address)
-        elif size == 2:
-            value, result, error = self.packet_handler.read2ByteTxRx(
-                self.port_handler, motor_id, address)
-        elif size == 4:
-            value, result, error = self.packet_handler.read4ByteTxRx(
-                self.port_handler, motor_id, address)
-        else:
-            raise ValueError(f"Invalid size: {size}")
+        with self.port_lock:
+            if size == 1:
+                value, result, error = self.packet_handler.read1ByteTxRx(
+                    self.port_handler, motor_id, address)
+            elif size == 2:
+                value, result, error = self.packet_handler.read2ByteTxRx(
+                    self.port_handler, motor_id, address)
+            elif size == 4:
+                value, result, error = self.packet_handler.read4ByteTxRx(
+                    self.port_handler, motor_id, address)
+            else:
+                raise ValueError(f"Invalid size: {size}")
 
-        if result != COMM_SUCCESS or error != 0:
-            return None
+            if result != COMM_SUCCESS or error != 0:
+                return None
 
-        return value
+            return value
 
     def sync_read_positions(self) -> Dict[int, int]:
         """
@@ -268,36 +274,37 @@ class DynamixelController:
         Returns:
             Dictionary mapping motor_id -> position
         """
-        # Create GroupSyncRead
-        group_sync_read = GroupSyncRead(
-            self.port_handler, self.packet_handler,
-            self.ADDR_PRESENT_POSITION, 4
-        )
+        with self.port_lock:
+            # Create GroupSyncRead
+            group_sync_read = GroupSyncRead(
+                self.port_handler, self.packet_handler,
+                self.ADDR_PRESENT_POSITION, 4
+            )
 
-        # Add all motors to read
-        for motor_id in self.motor_config.keys():
-            group_sync_read.addParam(motor_id)
+            # Add all motors to read
+            for motor_id in self.motor_config.keys():
+                group_sync_read.addParam(motor_id)
 
-        # Transmit packet
-        result = group_sync_read.txRxPacket()
-        if result != COMM_SUCCESS:
-            print(f"[DynamixelController] Sync read error: "
-                  f"{self.packet_handler.getTxRxResult(result)}")
-            return {}
+            # Transmit packet
+            result = group_sync_read.txRxPacket()
+            if result != COMM_SUCCESS:
+                print(f"[DynamixelController] Sync read error: "
+                      f"{self.packet_handler.getTxRxResult(result)}")
+                return {}
 
-        # Get data
-        positions = {}
-        for motor_id in self.motor_config.keys():
-            if group_sync_read.isAvailable(motor_id, self.ADDR_PRESENT_POSITION, 4):
-                position = group_sync_read.getData(motor_id, self.ADDR_PRESENT_POSITION, 4)
-                positions[motor_id] = position
-            else:
-                print(f"[DynamixelController] Failed to read motor {motor_id}")
+            # Get data
+            positions = {}
+            for motor_id in self.motor_config.keys():
+                if group_sync_read.isAvailable(motor_id, self.ADDR_PRESENT_POSITION, 4):
+                    position = group_sync_read.getData(motor_id, self.ADDR_PRESENT_POSITION, 4)
+                    positions[motor_id] = position
+                else:
+                    print(f"[DynamixelController] Failed to read motor {motor_id}")
 
-        # Clear parameters
-        group_sync_read.clearParam()
+            # Clear parameters
+            group_sync_read.clearParam()
 
-        # Update state
+        # Update state (outside port_lock to avoid nested locks)
         with self.state_lock:
             self.current_positions = positions
 
@@ -326,37 +333,38 @@ class DynamixelController:
                 # Shadow commanded, also command primary
                 expanded_positions[primary_id] = positions[shadow_id]
 
-        # Create GroupSyncWrite
-        group_sync_write = GroupSyncWrite(
-            self.port_handler, self.packet_handler,
-            self.ADDR_GOAL_POSITION, 4
-        )
+        with self.port_lock:
+            # Create GroupSyncWrite
+            group_sync_write = GroupSyncWrite(
+                self.port_handler, self.packet_handler,
+                self.ADDR_GOAL_POSITION, 4
+            )
 
-        # Add parameters for each motor
-        for motor_id, position in expanded_positions.items():
-            # Clamp position to valid range
-            position = max(0, min(4095, int(position)))
+            # Add parameters for each motor
+            for motor_id, position in expanded_positions.items():
+                # Clamp position to valid range
+                position = max(0, min(4095, int(position)))
 
-            # Convert to byte array
-            position_bytes = [
-                DXL_LOBYTE(DXL_LOWORD(position)),
-                DXL_HIBYTE(DXL_LOWORD(position)),
-                DXL_LOBYTE(DXL_HIWORD(position)),
-                DXL_HIBYTE(DXL_HIWORD(position))
-            ]
+                # Convert to byte array
+                position_bytes = [
+                    DXL_LOBYTE(DXL_LOWORD(position)),
+                    DXL_HIBYTE(DXL_LOWORD(position)),
+                    DXL_LOBYTE(DXL_HIWORD(position)),
+                    DXL_HIBYTE(DXL_HIWORD(position))
+                ]
 
-            # Add to group
-            if not group_sync_write.addParam(motor_id, position_bytes):
-                print(f"[DynamixelController] Failed to add motor {motor_id} to sync write")
+                # Add to group
+                if not group_sync_write.addParam(motor_id, position_bytes):
+                    print(f"[DynamixelController] Failed to add motor {motor_id} to sync write")
 
-        # Transmit packet
-        result = group_sync_write.txPacket()
-        if result != COMM_SUCCESS:
-            print(f"[DynamixelController] Sync write error: "
-                  f"{self.packet_handler.getTxRxResult(result)}")
+            # Transmit packet
+            result = group_sync_write.txPacket()
+            if result != COMM_SUCCESS:
+                print(f"[DynamixelController] Sync write error: "
+                      f"{self.packet_handler.getTxRxResult(result)}")
 
-        # Clear parameters
-        group_sync_write.clearParam()
+            # Clear parameters
+            group_sync_write.clearParam()
 
     def get_joint_positions_radians(self) -> Optional[np.ndarray]:
         """
@@ -471,6 +479,44 @@ class DynamixelController:
                 'current_positions': self.current_positions.copy(),
                 'current_joints_rad': self.current_positions_rad.copy()
             }
+
+    def get_cached_positions(self) -> Dict[int, int]:
+        """
+        Get cached motor positions without accessing the port.
+
+        Use this method when you need motor positions but don't need
+        the absolute latest values. This is thread-safe and doesn't
+        block on port access.
+
+        Returns:
+            Dictionary mapping motor_id -> position (Dynamixel units)
+        """
+        with self.state_lock:
+            return self.current_positions.copy()
+
+    def get_cached_joint_radians(self) -> np.ndarray:
+        """
+        Get cached joint positions in radians without accessing the port.
+
+        Use this method when you need joint angles but don't need
+        the absolute latest values. This is thread-safe and doesn't
+        block on port access.
+
+        Returns:
+            Array of 6 joint angles in radians
+        """
+        with self.state_lock:
+            return self.current_positions_rad.copy()
+
+    def get_cached_gripper_position(self) -> Optional[int]:
+        """
+        Get cached gripper position without accessing the port.
+
+        Returns:
+            Gripper position in Dynamixel units or None if not available
+        """
+        with self.state_lock:
+            return self.current_positions.get(9, None)
 
     def close(self):
         """Close port and cleanup."""

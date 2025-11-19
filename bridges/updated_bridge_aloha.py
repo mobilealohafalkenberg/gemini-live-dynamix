@@ -922,23 +922,23 @@ async def initialize_robot():
         baudrate = 1000000
 
         print(f"[Bridge] Connecting to Dynamixel port: {port} at {baudrate} baud")
-        dynamixel_controller = DynamixelController(port=port, baudrate=baudrate)
 
-        # Connect to motors
-        if not dynamixel_controller.connect():
-            print(f"[Bridge] ✗ Failed to connect to Dynamixel port: {port}")
+        # Load motor configuration
+        config_file = str(Path(__file__).parent.parent / "config" / "vx300s.yaml")
+        dynamixel_controller = DynamixelController(
+            port=port,
+            baudrate=baudrate,
+            config_file=config_file
+        )
+
+        # Initialize motors (opens port and configures all motors)
+        print("[Bridge] Initializing motors...")
+        if not dynamixel_controller.initialize_motors():
+            print(f"[Bridge] ✗ Failed to initialize Dynamixel motors on port: {port}")
             print("[Bridge] Please check:")
             print("  1. Port exists: ls -l /dev/ttyDXL /dev/ttyUSB*")
             print("  2. User has permissions: sudo usermod -aG dialout $USER")
             print("  3. Power supply is connected")
-            raise Exception("Failed to connect to Dynamixel motors")
-
-        print("[Bridge] ✓ Connected to Dynamixel motors")
-
-        # Initialize all motors
-        print("[Bridge] Initializing motors...")
-        if not dynamixel_controller.initialize_motors():
-            print("[Bridge] ✗ Failed to initialize motors")
             raise Exception("Failed to initialize Dynamixel motors")
 
         print("[Bridge] ✓ All motors initialized successfully")
