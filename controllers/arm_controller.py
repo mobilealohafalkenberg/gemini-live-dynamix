@@ -768,15 +768,24 @@ class ArmController:
         if not self.initialized:
             return {"success": False, "error": "Not initialized", "state": "unknown"}
 
-        print(f"[ArmController] 🎬 Starting opening ceremony (moving to ready in {moving_time}s)")
+        print(f"[ArmController] Starting opening ceremony (moving to ready in {moving_time}s)")
+
+        # Set slow profile velocity for smooth ceremony movement
+        # Value 40 is very slow compared to default 131
+        self.dxl.set_profile_velocity(40)
+        self.dxl.set_profile_acceleration(50)
 
         # Move slowly to ready position
         result = self.move_to_pose('ready', moving_time=moving_time, blocking=blocking)
 
+        # Restore normal profile velocity for regular operations
+        self.dxl.set_profile_velocity(131)
+        self.dxl.set_profile_acceleration(0)  # 0 = use default/immediate
+
         if result.get('success'):
-            print("[ArmController] ✓ Opening ceremony complete - arm is ready")
+            print("[ArmController] Opening ceremony complete - arm is ready")
         else:
-            print(f"[ArmController] ✗ Opening ceremony failed: {result.get('error')}")
+            print(f"[ArmController] Opening ceremony failed: {result.get('error')}")
 
         return result
 
@@ -797,16 +806,25 @@ class ArmController:
         if not self.initialized:
             return {"success": False, "error": "Not initialized", "state": "unknown"}
 
-        print(f"[ArmController] 🎬 Starting closing ceremony (moving to sleep in {moving_time}s)")
+        print(f"[ArmController] Starting closing ceremony (moving to sleep in {moving_time}s)")
+
+        # Set slow profile velocity for smooth ceremony movement
+        # Value 40 is very slow compared to default 131
+        self.dxl.set_profile_velocity(40)
+        self.dxl.set_profile_acceleration(50)
 
         # Move slowly to sleep position
         result = self.move_to_pose('sleep', moving_time=moving_time, blocking=blocking)
 
+        # Restore normal profile velocity for regular operations
+        self.dxl.set_profile_velocity(131)
+        self.dxl.set_profile_acceleration(0)  # 0 = use default/immediate
+
         if result.get('success'):
-            print("[ArmController] ✓ Closing ceremony complete - arm is in sleep position")
-            print("[ArmController] ℹ️ Torque remains ON to hold position safely")
+            print("[ArmController] Closing ceremony complete - arm is in sleep position")
+            print("[ArmController] Torque remains ON to hold position safely")
         else:
-            print(f"[ArmController] ✗ Closing ceremony failed: {result.get('error')}")
+            print(f"[ArmController] Closing ceremony failed: {result.get('error')}")
 
         return result
 

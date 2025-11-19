@@ -40,6 +40,8 @@ class DynamixelController:
     ADDR_POSITION_P_GAIN = 84
     ADDR_POSITION_I_GAIN = 82
     ADDR_POSITION_D_GAIN = 80
+    ADDR_PROFILE_VELOCITY = 112
+    ADDR_PROFILE_ACCELERATION = 108
 
     # Dynamixel Protocol Version
     PROTOCOL_VERSION = 2.0
@@ -199,6 +201,54 @@ class DynamixelController:
             self.write_register(motor_id, self.ADDR_TORQUE_ENABLE, 1, 0)
 
         print(f"[DynamixelController] Torque disabled on motors: {motor_ids}")
+
+    def set_profile_velocity(self, velocity: int, motor_ids: Optional[List[int]] = None):
+        """
+        Set Profile Velocity for motors to control movement speed.
+
+        Profile Velocity determines how fast the motor moves to its goal position.
+        Lower values = slower movement, higher values = faster movement.
+        Value of 0 means use the maximum velocity (Velocity_Limit).
+
+        Args:
+            velocity: Profile velocity value (0-1023 typical range)
+                     - 0: Maximum speed (no profile, uses Velocity_Limit)
+                     - 30-50: Very slow (good for ceremonies)
+                     - 100: Moderate speed
+                     - 131: Default/normal speed
+            motor_ids: List of motor IDs, or None for all arm motors
+        """
+        if motor_ids is None:
+            # Default to arm motors (skip gripper 9)
+            motor_ids = [1, 2, 3, 4, 5, 6, 7, 8]
+
+        for motor_id in motor_ids:
+            self.write_register(motor_id, self.ADDR_PROFILE_VELOCITY, 4, velocity)
+
+        print(f"[DynamixelController] Profile velocity set to {velocity} on motors: {motor_ids}")
+
+    def set_profile_acceleration(self, acceleration: int, motor_ids: Optional[List[int]] = None):
+        """
+        Set Profile Acceleration for motors to control movement smoothness.
+
+        Profile Acceleration determines how quickly the motor accelerates/decelerates.
+        Lower values = smoother but slower start/stop, higher values = quicker response.
+
+        Args:
+            acceleration: Profile acceleration value (0-32767 typical range)
+                         - 0: Infinite acceleration (immediate)
+                         - 50-100: Smooth acceleration (good for ceremonies)
+                         - 200+: Quick response
+            motor_ids: List of motor IDs, or None for all arm motors
+        """
+        if motor_ids is None:
+            # Default to arm motors (skip gripper 9)
+            motor_ids = [1, 2, 3, 4, 5, 6, 7, 8]
+
+        for motor_id in motor_ids:
+            self.write_register(motor_id, self.ADDR_PROFILE_ACCELERATION, 4, acceleration)
+
+        print(f"[DynamixelController] Profile acceleration set to {acceleration} on motors: {motor_ids}")
 
     def write_register(self, motor_id: int, address: int, size: int, value: int) -> bool:
         """
