@@ -15,6 +15,8 @@ import time
 import threading
 import numpy as np
 import yaml
+import glob
+import re
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from dynamixel_sdk import *
@@ -26,6 +28,37 @@ class DynamixelController:
 
     Replaces ROS2 + Interbotix SDK for simpler, faster control.
     """
+
+    @staticmethod
+    def detect_follower_ports() -> List[Dict[str, str]]:
+        """
+        Detect available follower arms by scanning /dev/ttyDXL_* ports.
+
+        Returns:
+            List of dicts with 'port' and 'arm_id' keys
+            Example: [
+                {'port': '/dev/ttyDXL_follower_left', 'arm_id': 'follower_left'},
+                {'port': '/dev/ttyDXL_follower_right', 'arm_id': 'follower_right'}
+            ]
+            Returns empty list if no follower arms found.
+        """
+        # Find all ttyDXL devices
+        all_ports = glob.glob('/dev/ttyDXL_*')
+
+        # Filter for follower arms only
+        follower_pattern = re.compile(r'/dev/ttyDXL_(follower_(?:left|right))')
+
+        detected = []
+        for port in all_ports:
+            match = follower_pattern.match(port)
+            if match:
+                arm_id = match.group(1)  # e.g., 'follower_left'
+                detected.append({
+                    'port': port,
+                    'arm_id': arm_id
+                })
+
+        return detected
 
     # Dynamixel Protocol 2.0 Control Table Addresses
     ADDR_TORQUE_ENABLE = 64
