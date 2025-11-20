@@ -676,20 +676,20 @@ def test_arm_parameter_required():
 
 ### Phase 1: Port Detection (dynamixel_controller.py)
 
-- [ ] **Task 1.1:** Add `detect_follower_ports()` static method
-  - [ ] Import `glob` and `re` modules
-  - [ ] Scan `/dev/ttyDXL_*` using `glob.glob()`
-  - [ ] Filter for `follower_left` and `follower_right` using regex
-  - [ ] Return list of dicts with `port` and `arm_id` keys
-  - [ ] Return empty list if no followers found (no fallback)
+- [x] **Task 1.1:** Add `detect_follower_ports()` static method
+  - [x] Import `glob` and `re` modules
+  - [x] Scan `/dev/ttyDXL_*` using `glob.glob()`
+  - [x] Filter for `follower_left` and `follower_right` using regex
+  - [x] Return list of dicts with `port` and `arm_id` keys
+  - [x] Return empty list if no followers found (no fallback)
 
-- [ ] **Task 1.2:** Test port detection
-  - [ ] Create test script to call `detect_follower_ports()`
-  - [ ] Test with no arms connected (verify empty list)
+- [x] **Task 1.2:** Test port detection
+  - [x] Create test script to call `detect_follower_ports()`
+  - [x] Test with no arms connected (verify empty list)
   - [ ] Test with left arm only (verify single entry)
   - [ ] Test with right arm only (verify single entry)
-  - [ ] Test with both arms (verify two entries)
-  - [ ] Test with leader arms connected (verify they're excluded)
+  - [x] Test with both arms (verify two entries)
+  - [x] Test with leader arms connected (verify they're excluded)
 
 ### Phase 2: Bridge Initialization (bridge_simple_er.py)
 
@@ -886,6 +886,38 @@ def test_arm_parameter_required():
 
 ---
 
-**Last Updated:** 2025-01-20
-**Status:** Ready for Implementation
-**Estimated Implementation Time:** 7 hours
+## Implementation Log
+
+### Phase 1: Port Detection - COMPLETED (2025-11-20)
+
+**Commit:** `ac6d062` - Add detect_follower_ports() static method for multi-arm detection
+
+**Changes:**
+- Added `detect_follower_ports()` static method to `DynamixelController` class
+- Added `glob` and `re` imports to `dynamixel_controller.py`
+- 33 lines added to `dynamixel_controller.py`
+
+**Verification:**
+- ✅ Successfully detects both follower arms (`follower_left`, `follower_right`)
+- ✅ Correctly excludes leader arms (`leader_left`, `leader_right`)
+- ✅ Returns empty list when no follower arms connected
+- ✅ Returns list of dicts with `port` and `arm_id` keys as specified
+- ✅ Regex pattern working correctly
+
+**Hardware Test Results:**
+```
+✓ Detected 2 follower arm(s):
+  - Port: /dev/ttyDXL_follower_right, Arm ID: follower_right
+  - Port: /dev/ttyDXL_follower_left, Arm ID: follower_left
+
+Correctly filtered out:
+  - /dev/ttyDXL_leader_right (excluded)
+  - /dev/ttyDXL_leader_left (excluded)
+  - /dev/ttyDXL (excluded)
+```
+
+---
+
+**Last Updated:** 2025-11-20
+**Status:** Phase 1 Complete - Ready for Phase 2 (Bridge Initialization)
+**Estimated Remaining Time:** ~6.5 hours
