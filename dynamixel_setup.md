@@ -1,10 +1,10 @@
-# ALOHA with Dynamixel SDK - Complete System Setup
+# ALOHA with Dynamixel SDK - System Documentation
 
-**System:** Mobile ALOHA with Gemini 2.5 Flash Live API
+**System:** Mobile ALOHA with Gemini Robotics ER API
 **Stack:** Direct Dynamixel SDK + Python (No ROS2)
-**Date:** 2025-01-13
+**Date:** 2025-11-20
 
-This document provides complete setup instructions for building a voice-controlled Mobile ALOHA system using Google's Gemini 2.5 Flash Live API with direct Dynamixel SDK motor control (no ROS2 required).
+This document describes the vision-guided Mobile ALOHA system using Google's Gemini Robotics ER API with direct Dynamixel SDK motor control (no ROS2).
 
 ---
 
@@ -12,81 +12,74 @@ This document provides complete setup instructions for building a voice-controll
 
 1. [System Overview](#system-overview)
 2. [Architecture](#architecture)
-3. [Components Overview](#components-overview)
-4. [What Stays the Same](#what-stays-the-same)
-5. [What Changes](#what-changes)
-6. [New Components](#new-components)
-7. [Implementation Details](#implementation-details)
-8. [Installation](#installation)
-9. [Running the System](#running-the-system)
-10. [Testing](#testing)
-11. [Troubleshooting](#troubleshooting)
+3. [How It Works](#how-it-works)
+4. [Components](#components)
+5. [Installation](#installation)
+6. [Running the System](#running-the-system)
+7. [Configuration](#configuration)
+8. [Troubleshooting](#troubleshooting)
 
 ---
 
 ## System Overview
 
-This system enables natural language control of a Mobile ALOHA robot through voice commands processed by Google's Gemini 2.5 Flash Live API. The key innovation is **direct Dynamixel SDK motor control**, eliminating the ROS2 middleware layer for simpler deployment and lower latency.
+This system enables vision-guided robot control using Google's Gemini Robotics ER (Embodied Reasoning) API. The robot executes manipulation tasks by analyzing camera images, planning actions step-by-step, and verifying results visually after each movement.
 
 ### Key Features
 
-- **Voice Control:** Real-time conversation with Gemini for robot commands
-- **Visual Understanding:** Dual camera feeds (gripper + overhead) for spatial awareness
-- **Trajectory-Based Control:** Multi-waypoint manipulation with gripper coordination
+- **Vision-Guided Control:** Gemini ER analyzes camera images and plans manipulation tasks
+- **Iterative Execution:** Execute one action at a time with visual verification between steps
+- **Dual Camera System:** Gripper camera for grasp verification + overhead camera for spatial planning
+- **Direct Motor Control:** Sub-10ms latency via Dynamixel SDK (no ROS2)
 - **Safety Systems:** Workspace limits, joint constraints, collision avoidance
-- **Direct Motor Control:** Sub-10ms latency via Dynamixel SDK
-- **Simple Deployment:** 3 pip packages, no ROS2 required
+- **Robot Ceremonies:** Smooth connect/disconnect workflows with sleep positions
 
 ### Performance Metrics
 
-| Metric | This System (Dynamixel SDK) |
-|--------|----------------------------|
+| Metric | Performance |
+|--------|-------------|
 | **Startup Time** | ~1 second |
 | **Command Latency** | 5-15ms |
-| **Running Processes** | 3 (bridge, camera threads) |
-| **Dependencies** | ~5 packages (~50MB) |
-| **Installation Steps** | 3 commands |
+| **State Monitoring** | 10Hz |
+| **Dependencies** | 7 packages (~60MB) |
+| **Installation Steps** | 4 commands |
 
 ---
 
 ## Architecture
 
-### Complete System Flow
+### System Flow
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│              Google Gemini 2.5 Flash Live API                   │
-│  • Real-time voice conversation                                 │
-│  • Tool calling for robot control                               │
-│  • Visual scene understanding (dual camera feeds)               │
-│  • Native audio (30 HD voices, 24 languages)                    │
+│         Google Gemini Robotics ER API (google-genai SDK)        │
+│  • Model: gemini-robotics-er-1.5-preview                        │
+│  • Multimodal input: Text prompts + Camera images               │
+│  • Iterative execution: One action → Visual verification        │
+│  • Conversation state maintained across steps                   │
 └───────────────────────────────┬─────────────────────────────────┘
-                                │ WebSocket
+                                │ REST API (JSON)
 ┌───────────────────────────────▼─────────────────────────────────┐
-│           React Frontend (TypeScript, Port 3000)                │
-│  • ALOHAControl.tsx - UI and tool definitions                   │
-│  • genai-live-client.ts - WebSocket to Gemini                   │
-│  • audio-recorder.ts - Microphone capture (16kHz PCM16)         │
-│  • Camera frame merging (1280x480 labeled view)                 │
-└───────────────────────────────┬─────────────────────────────────┘
-                                │ HTTP/WebSocket (localhost)
-┌───────────────────────────────▼─────────────────────────────────┐
-│        Python Bridge (bridge_aloha_real.py, Port 8081)          │
+│    Python ER Bridge (er-setup/bridge_simple_er.py, Port 8082)   │
 │  • aiohttp HTTP server with CORS                                │
-│  • Receives tool calls from Gemini                              │
-│  • Routes to ArmController / GripperController                  │
-│  • Fire-and-forget response pattern                             │
+│  • Endpoint: POST /robotics-er-request                          │
+│  • Captures camera images automatically                         │
+│  • Sends images + robot state to Gemini ER                      │
+│  • Executes ONE function at a time                              │
+│  • Returns execution result + NEW images for verification       │
+│  • Manages conversation state across steps                      │
 └─────────┬────────────────┬──────────────────────────┬───────────┘
           │                │                          │
 ┌─────────▼────────┐ ┌────▼───────────┐ ┌───────────▼──────────┐
 │ ArmController    │ │ GripperControl │ │ CameraController     │
 │                  │ │                │ │                      │
 │ • Move joints    │ │ • Open/close   │ │ • RealSense D405    │
-│ • Move cartesian │ │ • State track  │ │ • pyrealsense2 SDK  │
-│ • Trajectory     │ │ • 300mA limit  │ │ • Thread-based      │
-│ • Safety checks  │ │ • 10Hz monitor │ │ • Independent       │
-│ • IK computation │ │                │ │                      │
-└─────────┬────────┘ └────┬───────────┘ └─────────────────────┘
+│ • Move cartesian │ │ • State track  │ │ • RGBD capture      │
+│ • Trajectories   │ │ • 300mA limit  │ │ • Base64 JPEG       │
+│ • Safety checks  │ │ • Grasp verify │ │ • Dual cameras      │
+│ • IK via MR      │ │                │ │   - gripper_cam     │
+│ • Ceremonies     │ │                │ │   - top_cam         │
+└─────────┬────────┘ └────┬───────────┘ └──────────────────────┘
           │                │
 ┌─────────▼────────────────▼─────────────────────┐
 │   Modern Robotics IK/FK (Python library)       │
@@ -101,7 +94,7 @@ This system enables natural language control of a Mobile ALOHA robot through voi
 │ • PacketHandler - Protocol 2.0 packets         │
 │ • Motor initialization from config             │
 │ • Sync read/write operations                   │
-│ • Shadow motor coordination                    │
+│ • Shadow motor coordination (2↔3, 4↔5)         │
 │ • State monitoring thread (10Hz)               │
 └─────────┬──────────────────────────────────────┘
           │ dynamixel_sdk Python package
@@ -115,7 +108,7 @@ This system enables natural language control of a Mobile ALOHA robot through voi
 ┌─────────▼──────────────────────────────────────┐
 │   U2D2 USB Adapter                             │
 │ • TTL Half-Duplex conversion                   │
-│ • Device: /dev/ttyDXL (or /dev/ttyUSB0)        │
+│ • Device: /dev/ttyDXL_follower_right           │
 │ • Baud: 1Mbps                                  │
 └─────────┬──────────────────────────────────────┘
           │
@@ -129,618 +122,401 @@ This system enables natural language control of a Mobile ALOHA robot through voi
 
 ---
 
-## Components Overview
+## How It Works
 
-### Frontend (React/TypeScript)
-- **No changes from any existing implementation**
-- Handles voice input, Gemini communication, camera merging
-- Located in: `live-api-console/` directory
+### Iterative Execution Workflow
 
-### Python Bridge (aiohttp)
-- **Minor changes only to initialization**
-- HTTP server that routes Gemini tool calls to robot controllers
-- Located in: `bridges/bridge_aloha_real.py`
+The system operates in a step-by-step loop with visual verification:
 
-### Robot Controllers
-- **Complete refactor of backend, same external API**
-- `arm_controller.py` - Arm movement with IK, safety checks, trajectories
-- `gripper_controller.py` - Gripper open/close with current limiting
-- `camera_controller.py` - **No changes** (already independent)
+**Step 1: User submits task**
+```
+"Pick up the red cube"
+```
 
-### New: DynamixelController
-- **Brand new component**
-- Direct motor control via Dynamixel SDK
-- Located in: `dynamixel_controller.py`
+**Step 2: Bridge captures current state**
+- Takes photos from both cameras (gripper_cam + top_cam)
+- Reads current joint positions and end-effector position
+- Packages as context for Gemini ER
 
-### New: VX300S Model
-- **Brand new component**
-- Robot kinematics for IK/FK
-- Located in: `vx300s_model.py`
+**Step 3: Gemini ER analyzes and plans**
+- Receives: Task description + 2 camera images + robot state
+- Analyzes: Object locations, robot position, workspace
+- Returns: ONE function call (e.g., `move_arm` to approach position)
+
+**Step 4: Bridge executes action**
+- Calls the robot function (e.g., `arm_controller.move_to_position()`)
+- Waits for completion
+- Captures NEW camera images showing result
+
+**Step 5: Visual verification loop**
+- Sends execution result + NEW images back to Gemini ER
+- Gemini verifies: "Did the robot reach the target?"
+- If yes → Returns next action (e.g., `control_gripper("close")`)
+- If no → Adjusts and retries
+
+**Step 6: Repeat until task complete**
+- Each action gets visual verification
+- Critical steps (like grasping) are verified in gripper camera
+- Task completes when Gemini ER returns `task_complete: true`
+
+### Example Task Execution
+
+```
+User: "Pick up the red cube"
+
+Step 1: Gemini → move_arm([0.3, 0.1, 0.3])  # Approach cube
+        Bridge → Executes, captures images
+        Gemini → Verifies position in new images
+
+Step 2: Gemini → move_arm([0.3, 0.1, 0.05])  # Descend to grasp height
+        Bridge → Executes, captures images
+        Gemini → Confirms alignment
+
+Step 3: Gemini → control_gripper("open")  # Prepare to grasp
+        Bridge → Executes, captures images
+        Gemini → Sees gripper is open
+
+Step 4: Gemini → control_gripper("close")  # Attempt grasp
+        Bridge → Executes, captures images
+        Gemini → CHECKS GRIPPER CAMERA - "Cube is secured in gripper!"
+
+Step 5: Gemini → move_arm([0.3, 0.1, 0.25])  # Lift object
+        Bridge → Executes, captures images
+        Gemini → Confirms lift successful
+
+... continues until task complete
+```
+
+### Available Robot Functions
+
+The bridge exposes these functions to Gemini ER:
+
+```python
+def move_arm(position: list[float] = None, pose: str = None, moving_time: float = 1.5):
+    """Move robot end effector to target position or named pose.
+
+    Args:
+        position: Target [x, y, z] in meters (relative to robot base)
+        pose: Named pose - "home", "ready", or "sleep"
+        moving_time: Time to complete movement in seconds
+    """
+
+def control_gripper(action: str):
+    """Open or close the robot gripper.
+
+    Args:
+        action: "open" or "close"
+    """
+
+def get_arm_status():
+    """Get current arm state (joints, position, pose)."""
+
+def get_gripper_status():
+    """Get current gripper state."""
+
+def capture_camera_frame(reason: str):
+    """Capture fresh camera frames.
+
+    Args:
+        reason: Why frames are needed (e.g., "verify_grasp")
+    """
+```
 
 ---
 
-## What Stays the Same
+## Components
 
-These components require **NO CHANGES** and can be used exactly as-is:
+### Active Components (Connected and In Use)
 
-### 1. React Frontend (100% Unchanged)
+**1. ER Bridge** - `er-setup/bridge_simple_er.py`
+- HTTP REST server on port 8082
+- Integrates with Gemini Robotics ER API (google-genai SDK)
+- Handles iterative execution with visual verification
+- Manages conversation state across multiple steps
+- Performs robot connect/disconnect ceremonies
 
-**Files:**
-- `live-api-console/src/components/aloha-control/ALOHAControl.tsx`
-- `live-api-console/src/lib/genai-live-client.ts`
-- `live-api-console/src/lib/audio-recorder.ts`
-- `live-api-console/src/components/control-tray/ControlTray.tsx`
+**2. DynamixelController** - `dynamixel_controller.py`
+- Direct motor control via Dynamixel SDK
+- Sync read/write operations for efficiency
+- Shadow motor coordination (motors 2↔3, 4↔5)
+- State monitoring thread (10Hz)
+- Register access for configuration
 
-**What it does:**
-- Captures microphone audio (16kHz PCM16)
-- Connects to Gemini Live API via WebSocket
-- Defines robot control tools for Gemini
-- Merges camera frames with labels
-- Sends tool calls to Python bridge
-- Displays robot status in UI
+**3. VX300S Model** - `models/vx300s_model.py`
+- Robot kinematics (Product of Exponentials)
+- Screw axes (Slist) and home configuration (M matrix)
+- Joint limits and workspace bounds
+- Conversion helpers (radians ↔ Dynamixel units)
 
-**Tool Definitions (unchanged):**
-```typescript
-const tools = [
-  {
-    name: "control_gripper",
-    description: "Control the robot gripper",
-    parameters: { action: "string" } // "open" or "close"
-  },
-  {
-    name: "move_arm",
-    description: "Move the robot arm",
-    parameters: {
-      position: "array",  // [x, y, z] in meters
-      joints: "array",    // Or 6 joint angles
-      pose: "string"      // Or named pose: "home"/"sleep"/"ready"
-    }
-  },
-  {
-    name: "move_arm_trajectory",
-    description: "Execute multi-waypoint trajectory",
-    parameters: {
-      trajectory: "array", // List of waypoints
-      speed: "string"      // "slow"/"medium"/"fast"
-    }
-  },
-  // ... other tools
-];
+**4. ArmController** - `controllers/arm_controller.py`
+- Joint movement with safety checks
+- Cartesian movement with IK (Modern Robotics)
+- Named poses (home, ready, sleep)
+- Trajectory execution
+- Opening/closing ceremonies
+
+**5. GripperController** - `controllers/gripper_controller.py`
+- Open/close operations
+- Current limiting (300mA for safe grasping)
+- State tracking
+- Position monitoring
+
+**6. CameraController** - `controllers/camera_controller.py`
+- RealSense D405 camera interface
+- RGBD capture (color + depth)
+- Base64 JPEG encoding for API transmission
+- Dual camera support:
+  - `gripper_cam` - Mounted on end-effector (grasp verification)
+  - `top_cam` - Overhead view (spatial planning)
+
+### Inactive Components (Not Connected to Current Bridge)
+
+**Vision System** - `vision/` directory
+*Purpose:* Advanced object detection and 3D localization
+*Status:* Developed but not integrated into ER bridge
+
+Components:
+- `vision/gemini_vision_detector.py` - Object detection via Gemini Vision API
+- `vision/depth_projector.py` - 2D pixel → 3D coordinates conversion
+- `vision/camera_calibration.py` - Camera-to-robot transformations
+- `vision/object_localizer.py` - Combined detection + 3D localization
+- `controllers/vision_controller.py` - High-level vision API
+
+**Why not connected:** The current ER bridge relies on Gemini ER API to perform all vision reasoning directly. The vision modules could be integrated in the future for more precise localization.
+
+---
+
+## Installation
+
+### Prerequisites
+
+- Ubuntu 20.04+ or macOS
+- Python 3.8+
+- U2D2 USB adapter connected to `/dev/ttyDXL_follower_right`
+- VX300S robot hardware (right arm)
+- 2x Intel RealSense D405 cameras
+- Google API key for Gemini
+
+### Step 1: Install Python Dependencies
+
+```bash
+# Install Dynamixel SDK
+pip3 install dynamixel-sdk
+
+# Install kinematics library
+pip3 install modern-robotics
+
+# Install camera SDK
+pip3 install pyrealsense2
+
+# Install Gemini SDK
+pip3 install google-genai
+
+# Install web server dependencies
+pip3 install aiohttp aiohttp-cors
+
+# Install other dependencies
+pip3 install numpy pyyaml python-dotenv
 ```
 
-### 2. Gemini Integration (100% Unchanged)
+### Step 2: Set Up Serial Port Permissions
 
-**WebSocket Communication:**
-- `genai-live-client.ts` handles all Gemini API communication
-- Audio streaming in realtime
-- Camera frames sent at 1 FPS
-- Tool call/response handling
+```bash
+# Add your user to dialout group
+sudo usermod -aG dialout $USER
 
-**Fire-and-Forget Pattern:**
-```typescript
-client.on('toolCall', async (toolCall) => {
-  // Forward to Python bridge
-  fetch('http://localhost:8081/aloha-tool-call', {
-    method: 'POST',
-    body: JSON.stringify(toolCall)
-  });
+# Log out and log back in for changes to take effect
 
-  // Return empty response immediately (don't wait for robot)
-  client.sendToolResponse([{
-    functionResponses: [{
-      response: {},
-      id: toolCall.id
-    }]
-  }]);
-});
+# Verify device exists
+ls -l /dev/ttyDXL_follower_right
 ```
 
-### 3. Camera System (100% Unchanged)
+### Step 3: Clone Repository
 
-**File:** `camera_controller.py`
+```bash
+git clone <your-repo-url>
+cd gemini-live-dynamix
 
-**Already ROS-independent:**
-- Uses `pyrealsense2` SDK directly (pip package)
-- Thread-based capture (standard Python threading)
-- No ROS dependencies whatsoever
+# Config directory should already exist with vx300s.yaml
+```
 
-**Camera Configuration:**
-```python
-CAMERAS = {
-    'gripper_cam': {
-        'serial': '130322273632',  # Left arm gripper camera
-        'resolution': (640, 480),
-        'fps': 30
-    },
-    'top_cam': {
-        'serial': '130322273629',  # Overhead workspace view
-        'resolution': (640, 480),
-        'fps': 30
-    }
+### Step 4: Configure API Key
+
+```bash
+# Create .env file in project root
+echo "GEMINI_API_KEY=your_api_key_here" > .env
+
+# Or set environment variable
+export GEMINI_API_KEY=your_api_key_here
+```
+
+### Step 5: Verify Installation
+
+```bash
+# Test Dynamixel connection
+python3 -c "
+from dynamixel_controller import DynamixelController
+dxl = DynamixelController('/dev/ttyDXL_follower_right', 1000000, 'config/vx300s.yaml')
+dxl.initialize_motors()
+positions = dxl.sync_read_positions()
+print('Motor positions:', positions)
+print('Motor count:', len(positions))
+dxl.close()
+"
+```
+
+**Expected output:**
+```
+Motor positions: {1: 2048, 2: 1854, 3: 1854, 4: 2100, 5: 2100, 6: 2048, 7: 2048, 8: 2048, 9: 2500}
+Motor count: 9
+```
+
+---
+
+## Running the System
+
+### Start ER Bridge
+
+```bash
+cd /home/aloha/gemini-live-dynamix
+python3 er-setup/bridge_simple_er.py
+```
+
+**Command-line options:**
+```bash
+python3 er-setup/bridge_simple_er.py --port 8082 \
+                                      --dxl-port /dev/ttyDXL_follower_right \
+                                      --baudrate 1000000
+```
+
+**Expected output:**
+```
+================================================================
+Gemini Robotics ER Bridge - Direct Dynamixel Control
+================================================================
+
+Features:
+  - Direct hardware control via Dynamixel SDK
+  - Automatic camera capture (gripper_cam + top_cam)
+  - Iterative visual verification
+  - Conversation state maintained
+
+============================================================
+[ER Bridge] Initializing Robot Hardware
+============================================================
+
+[1/5] Loading robot model...
+  ✓ VX300S model loaded (6-DOF, 0.75m reach)
+
+[2/5] Connecting to Dynamixel bus at /dev/ttyDXL_follower_right...
+  ✓ Dynamixel controller connected, torque enabled, monitoring at 10Hz
+
+[3/5] Initializing arm controller...
+  ✓ Arm controller ready (awaiting connection for opening ceremony)
+
+[4/5] Initializing gripper controller...
+  ✓ Gripper controller ready (awaiting connection)
+
+[5/5] Initializing camera controller...
+  ✓ Camera controller ready (gripper_cam + top_cam)
+
+============================================================
+[ER Bridge] ✓ Robot hardware initialized!
+[ER Bridge] ℹ️  Use /robot/connect to perform opening ceremony
+============================================================
+
+Starting server on http://localhost:8082
+Endpoints:
+  - POST /robotics-er-request
+  - GET /status
+  - POST /robot/connect
+  - POST /robot/disconnect
+  - GET  /robot/status
+```
+
+### Using the System
+
+**1. Connect Robot (Opening Ceremony)**
+
+This slowly moves the arm to ready position and opens the gripper:
+
+```bash
+curl -X POST http://localhost:8082/robot/connect
+```
+
+**2. Submit Task**
+
+```bash
+curl -X POST http://localhost:8082/robotics-er-request \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "Pick up the red cube and move it to the blue cube"
+  }'
+```
+
+**Response format:**
+```json
+{
+  "success": true,
+  "conversation_id": "uuid-string",
+  "step": 1,
+  "reasoning": "I see a red cube at position [0.3, 0.1]. Moving arm to approach...",
+  "next_action": {
+    "function": "move_arm",
+    "args": {"position": [0.3, 0.1, 0.3]}
+  },
+  "execution_result": {
+    "success": true,
+    "function": "move_arm",
+    "message": "Moved to position [0.300, 0.100, 0.300]"
+  },
+  "images": ["base64_gripper_cam", "base64_top_cam"],
+  "verification_check": "After execution, gripper should be 30cm above cube",
+  "task_complete": false
 }
 ```
 
-**Usage:**
-```python
-camera_controller = CameraController()
-camera_controller.initialize()
+**3. Continue Conversation**
 
-# Get frame as base64 JPEG
-frame = camera_controller.get_frame_base64('gripper_cam')
+The frontend automatically sends feedback requests:
+
+```bash
+curl -X POST http://localhost:8082/robotics-er-request \
+  -H "Content-Type: application/json" \
+  -d '{
+    "conversation_id": "uuid-from-previous-response",
+    "execution_result": {...}
+  }'
 ```
 
-### 4. Bridge HTTP Server Structure (95% Unchanged)
+Fresh images are captured automatically and sent with each feedback request.
 
-**File:** `bridges/bridge_aloha_real.py`
+**4. Disconnect Robot (Closing Ceremony)**
 
-**What stays the same:**
-- aiohttp HTTP server on port 8081
-- CORS configuration for browser access
-- Tool call routing logic
-- Fire-and-forget response pattern
-- All endpoint handlers (`/aloha-tool-call`, `/status`, `/camera/...`)
+This closes the gripper and slowly moves to sleep position:
 
-**Tool Call Handler (unchanged):**
-```python
-async def handle_tool_call(request: web.Request) -> web.Response:
-    data = await request.json()
-    name = data.get('name')
-    args = data.get('args', {})
-
-    if name == 'control_gripper':
-        action = args.get('action', 'open')
-        if action == 'open':
-            result = gripper_controller.open_gripper()
-        elif action == 'close':
-            result = gripper_controller.close_gripper()
-
-    elif name == 'move_arm':
-        if 'position' in args:
-            result = arm_controller.move_to_position(
-                args['position'],
-                moving_time=args.get('moving_time'),
-                blocking=False
-            )
-        elif 'joints' in args:
-            result = arm_controller.move_joints(
-                args['joints'],
-                moving_time=args.get('moving_time'),
-                blocking=False
-            )
-        elif 'pose' in args:
-            result = arm_controller.move_to_pose(
-                args['pose'],
-                moving_time=args.get('moving_time'),
-                blocking=False
-            )
-
-    elif name == 'move_arm_trajectory':
-        result = arm_controller.execute_trajectory(
-            waypoints=args['trajectory'],
-            speed=args.get('speed', 'slow'),
-            coordinate_with_gripper=gripper_controller
-        )
-
-    return web.json_response({'success': True, 'result': result})
+```bash
+curl -X POST http://localhost:8082/robot/disconnect
 ```
 
-**Notice:** The tool call handler code doesn't change! The controllers just have a different backend.
+**5. Monitor Status**
 
----
+```bash
+# Bridge status
+curl http://localhost:8082/status
 
-## What Changes
+# Robot connection state
+curl http://localhost:8082/robot/status
 
-### 1. Bridge Initialization (Minor Changes)
-
-**BEFORE (with ROS2):**
-```python
-async def initialize_robot():
-    global gripper_controller, arm_controller, camera_controller, launch_process
-
-    # Launch ROS2 driver as subprocess
-    launch_script = Path(__file__).parent.parent.parent / "minimal_launch.sh"
-    launch_process = subprocess.Popen([str(launch_script)])
-    await asyncio.sleep(5)  # Wait for ROS2 node to start
-
-    # Initialize gripper controller (creates ROS node)
-    gripper_controller = GripperController()
-    gripper_success = gripper_controller.initialize()
-
-    # Initialize arm controller (shares ROS node and bot)
-    arm_controller = ArmController(
-        node=gripper_controller.node,
-        bot=gripper_controller.bot
-    )
-    arm_success = arm_controller.initialize()
-
-    # Initialize cameras (independent)
-    camera_controller = CameraController()
-    camera_success = camera_controller.initialize()
-```
-
-**AFTER (with Dynamixel SDK):**
-```python
-async def initialize_robot():
-    """Initialize robot with Dynamixel SDK (no ROS2)."""
-    global dxl_controller, gripper_controller, arm_controller, camera_controller
-
-    print("[Bridge] Initializing Dynamixel SDK...")
-
-    # Initialize DynamixelController (shared by all)
-    config_path = Path(__file__).parent.parent / "config" / "vx300s.yaml"
-
-    dxl_controller = DynamixelController(
-        port='/dev/ttyDXL',  # Or /dev/ttyUSB0
-        baudrate=1000000,
-        config_file=str(config_path)
-    )
-
-    # Initialize motors
-    dxl_controller.initialize_motors()
-    print("[Bridge] ✓ Dynamixel controller initialized")
-
-    # Start state monitoring
-    dxl_controller.start_monitoring(frequency=10)
-
-    # Initialize robot kinematics model
-    robot_model = VX300S()
-
-    # Initialize gripper controller (shares DynamixelController)
-    print("[Bridge] Initializing gripper controller...")
-    gripper_controller = GripperController(
-        dynamixel_controller=dxl_controller
-    )
-    gripper_success = gripper_controller.initialize()
-
-    if gripper_success:
-        print("[Bridge] ✓ Gripper controller initialized")
-
-    # Initialize arm controller (shares DynamixelController)
-    print("[Bridge] Initializing arm controller...")
-    arm_controller = ArmController(
-        dynamixel_controller=dxl_controller,
-        robot_model=robot_model
-    )
-    arm_success = arm_controller.initialize()
-
-    if arm_success:
-        print("[Bridge] ✓ Arm controller initialized")
-
-    # Initialize camera controller (unchanged)
-    print("[Bridge] Initializing camera controller...")
-    camera_controller = CameraController()
-    camera_success = camera_controller.initialize()
-
-    if camera_success:
-        print("[Bridge] ✓ Camera controller initialized")
-```
-
-**Key differences:**
-- ❌ No subprocess launch
-- ❌ No ROS2 node creation
-- ✅ Direct DynamixelController initialization
-- ✅ Shared controller instance
-- ✅ Simpler, faster startup
-
-### 2. ArmController (Major Backend Changes, Same API)
-
-**External API (stays exactly the same):**
-```python
-# These method signatures don't change:
-arm_controller.move_joints(joint_positions, unit='auto', moving_time=None, blocking=True)
-arm_controller.move_to_position(position, orientation=None, format='auto', moving_time=None, blocking=True)
-arm_controller.move_to_pose(pose_name, moving_time=None, blocking=True)
-arm_controller.execute_trajectory(waypoints, speed='slow', coordinate_with_gripper=None)
-arm_controller.get_arm_state()
-arm_controller.emergency_stop()
-```
-
-**Internal changes:**
-
-**Imports - BEFORE:**
-```python
-from aloha.robot_utils import move_arms, torque_on
-from interbotix_common_modules.common_robot.robot import create_interbotix_global_node
-from interbotix_xs_modules.xs_robot.arm import InterbotixManipulatorXS
-```
-
-**Imports - AFTER:**
-```python
-from dynamixel_controller import DynamixelController
-from vx300s_model import VX300S
-import modern_robotics as mr
-import numpy as np
-```
-
-**Initialization - BEFORE:**
-```python
-def __init__(self, robot_model='vx300s', robot_name='follower_left', node=None, bot=None):
-    self.bot = bot  # InterbotixManipulatorXS instance
-    self.node = node  # ROS node
-
-def initialize(self):
-    # Create ROS node
-    self.node = create_interbotix_global_node('arm_controller')
-    # Create InterbotixManipulatorXS
-    self.bot = InterbotixManipulatorXS(...)
-    # Start ROS
-    robot_startup(self.node)
-    # Configure motors via ROS services
-    self.bot.core.robot_set_operating_modes('group', 'arm', 'position')
-    torque_on(self.bot)
-```
-
-**Initialization - AFTER:**
-```python
-def __init__(self, dynamixel_controller=None, robot_model=None):
-    self.dxl = dynamixel_controller  # DynamixelController instance
-    self.model = robot_model or VX300S()  # Kinematics model
-
-def initialize(self):
-    # DynamixelController already initialized
-    # Just verify it's ready
-    current_pos = self.dxl.get_joint_positions_radians()
-    if current_pos is None:
-        return False
-    # Move to ready position
-    self.move_to_pose('ready', blocking=True)
-    return True
-```
-
-**Joint movement - BEFORE:**
-```python
-def move_joints(self, joint_positions, ...):
-    # ... safety checks ...
-    success = self.bot.arm.set_joint_positions(
-        angles_rad,
-        moving_time=moving_time,
-        accel_time=self.default_accel_time,
-        blocking=blocking
-    )
-```
-
-**Joint movement - AFTER:**
-```python
-def move_joints(self, joint_positions, ...):
-    # ... safety checks (same as before) ...
-    self.dxl.set_joint_positions_radians(angles_rad)
-    if blocking:
-        time.sleep(moving_time or self.default_moving_time)
-    return {"success": True}
-```
-
-**Cartesian movement - BEFORE:**
-```python
-def move_to_position(self, position, ...):
-    # Parse position
-    pos = self.parse_position(position)
-
-    # IK via InterbotixArmXSInterface (calls Modern Robotics internally)
-    joint_positions, success = self.bot.arm.set_ee_pose_components(
-        x=pos['x'], y=pos['y'], z=pos['z'],
-        roll=orientation[0], pitch=orientation[1], yaw=orientation[2],
-        execute=False  # Just get IK solution
-    )
-
-    # Safety check
-    is_safe, warning = self.check_safety_constraints(joint_positions)
-    if not is_safe:
-        return {"success": False, "error": warning}
-
-    # Execute
-    self.bot.arm.set_ee_pose_components(..., execute=True)
-```
-
-**Cartesian movement - AFTER:**
-```python
-def move_to_position(self, position, ...):
-    # Parse position (same as before)
-    pos = self.parse_position(position)
-
-    # Build SE(3) transformation matrix
-    if orientation is None:
-        yaw = math.atan2(pos['y'], pos['x'])
-        orientation = [0.0, 0.0, yaw]
-
-    T_target = self._build_transformation_matrix(pos, orientation)
-
-    # Run IK using Modern Robotics directly
-    current_joints = self.dxl.get_joint_positions_radians()
-
-    joint_solution, success = mr.IKinSpace(
-        self.model.Slist,
-        self.model.M,
-        T_target,
-        current_joints,
-        eomg=0.01,
-        ev=0.001
-    )
-
-    if not success:
-        return {"success": False, "error": "IK solution not found"}
-
-    # Safety check (same as before)
-    is_safe, warning = self.check_safety_constraints(joint_solution, ee_position=pos)
-    if not is_safe:
-        return {"success": False, "error": warning}
-
-    # Execute
-    self.dxl.set_joint_positions_radians(joint_solution)
-    if blocking:
-        time.sleep(moving_time or self.default_moving_time)
-
-    return {"success": True}
-```
-
-**What's preserved:**
-- ✅ Safety checks (all workspace and joint constraint logic)
-- ✅ Position parsing (auto-detect formats)
-- ✅ Trajectory execution (same waypoint logic)
-- ✅ State tracking (monitoring thread pattern)
-- ✅ Named poses (home, sleep, ready)
-
-### 3. GripperController (Major Backend Changes, Same API)
-
-**External API (stays exactly the same):**
-```python
-# These method signatures don't change:
-gripper_controller.open_gripper(blocking=True)
-gripper_controller.close_gripper(blocking=True)
-gripper_controller.set_gripper_position(position, blocking=True)
-gripper_controller.get_gripper_state()
-```
-
-**Internal changes:**
-
-**BEFORE:**
-```python
-from aloha.robot_utils import move_grippers
-from interbotix_xs_modules.xs_robot.arm import InterbotixManipulatorXS
-
-def __init__(self):
-    self.bot = None  # InterbotixManipulatorXS
-
-def initialize(self):
-    self.node = create_interbotix_global_node('gripper_controller')
-    self.bot = InterbotixManipulatorXS(...)
-    robot_startup(self.node)
-    # Configure gripper for current-based position control
-    self.bot.core.robot_set_operating_modes('single', 'gripper', 'current_based_position')
-    self.bot.core.robot_set_motor_registers('single', 'gripper', 'current_limit', 300)
-
-def open_gripper(self):
-    move_grippers([self.bot], [FOLLOWER_GRIPPER_JOINT_OPEN], moving_time=1.0)
-```
-
-**AFTER:**
-```python
-from dynamixel_controller import DynamixelController
-
-# Constants
-FOLLOWER_GRIPPER_JOINT_OPEN = 1.62   # radians
-FOLLOWER_GRIPPER_JOINT_CLOSE = -0.62  # radians
-
-def __init__(self, dynamixel_controller=None):
-    self.dxl = dynamixel_controller
-    self.gripper_id = 9  # Motor ID
-
-def initialize(self):
-    # Set current limit for safe grasping
-    self.dxl.write_register(
-        self.gripper_id,
-        self.dxl.ADDR_CURRENT_LIMIT,
-        2,
-        300  # 300mA
-    )
-    # Close gripper initially
-    self.close_gripper()
-    return True
-
-def open_gripper(self):
-    dynamixel_pos = self._radians_to_dynamixel(FOLLOWER_GRIPPER_JOINT_OPEN)
-    self.dxl.sync_write_positions({self.gripper_id: dynamixel_pos})
-    if blocking:
-        time.sleep(1.0)
-    return {"success": True, "state": "open"}
-
-def _radians_to_dynamixel(self, radians):
-    """Convert radians to Dynamixel units (0-4095)."""
-    # Linear mapping: -0.62 rad → 1000 units, +1.62 rad → 3800 units
-    units = int(((radians + 0.62) / (1.62 + 0.62)) * (3800 - 1000) + 1000)
-    return max(0, min(4095, units))
+# Individual camera frame
+curl http://localhost:8082/camera/gripper_cam/frame
 ```
 
 ---
 
-## New Components
+## Configuration
 
-### 1. DynamixelController (Complete New Class)
-
-**File:** `dynamixel_controller.py`
-
-This is the core component that replaces the entire ROS2 stack. See [Implementation Details](#implementation-details) section for the full code (600+ lines).
-
-**Key responsibilities:**
-- Initialize all 9 motors with proper configuration
-- Handle shadow motor coordination (motors 2↔3, 4↔5)
-- Sync read/write operations for efficiency
-- State monitoring thread
-- Register access for configuration
-- Error handling and recovery
-
-**Public API:**
-```python
-dxl = DynamixelController(port='/dev/ttyDXL', baudrate=1000000, config_file='config/vx300s.yaml')
-dxl.initialize_motors()
-dxl.start_monitoring(frequency=10)
-
-# Read joint positions
-positions = dxl.get_joint_positions_radians()  # Returns np.array of 6 angles
-
-# Write joint positions
-dxl.set_joint_positions_radians(np.array([0, 0, 0, 0, 0, 0]))
-
-# Sync operations
-dxl.sync_read_positions()  # Read all motors
-dxl.sync_write_positions({1: 2048, 2: 2500})  # Write specific motors
-
-# Control
-dxl.enable_torque()
-dxl.disable_torque()
-
-# Cleanup
-dxl.stop_monitoring()
-dxl.close()
-```
-
-### 2. VX300S Kinematics Model
-
-**File:** `vx300s_model.py`
-
-Contains robot kinematics for IK/FK computation using Modern Robotics library.
-
-```python
-import numpy as np
-
-class VX300S:
-    """VX300S robot kinematics model."""
-
-    # Screw axes in space frame (Product of Exponentials)
-    Slist = np.array([
-        [0.0, 0.0, 1.0,  0.0,     0.0,     0.0],      # Waist
-        [0.0, 1.0, 0.0, -0.12705, 0.0,     0.0],      # Shoulder
-        [0.0, 1.0, 0.0, -0.42705, 0.0,     0.05955],  # Elbow
-        [1.0, 0.0, 0.0,  0.0,     0.42705, 0.0],      # Forearm roll
-        [0.0, 1.0, 0.0, -0.42705, 0.0,     0.35955],  # Wrist angle
-        [1.0, 0.0, 0.0,  0.0,     0.42705, 0.0]       # Wrist rotate
-    ]).T
-
-    # Home configuration (end-effector pose when all joints at 0)
-    M = np.array([
-        [1.0, 0.0, 0.0, 0.536494],
-        [0.0, 1.0, 0.0, 0.0],
-        [0.0, 0.0, 1.0, 0.42705],
-        [0.0, 0.0, 0.0, 1.0]
-    ])
-
-    # Joint limits (radians)
-    joint_limits = [
-        (-np.pi, np.pi),      # Waist
-        (-1.97, 1.75),        # Shoulder
-        (-1.52, 1.80),        # Elbow
-        (-np.pi, np.pi),      # Forearm roll
-        (-1.74, 2.23),        # Wrist angle
-        (-np.pi, np.pi)       # Wrist rotate
-    ]
-```
-
----
-
-## Implementation Details
-
-### Motor Configuration (VX300S)
-
-**Configuration File:** `config/vx300s.yaml`
+### Motor Configuration (`config/vx300s.yaml`)
 
 ```yaml
 motors:
@@ -822,318 +598,48 @@ motors:
 
 groups:
   arm:
-    motor_names: [waist, shoulder, elbow, forearm_roll, wrist_angle, wrist_rotate]
+    motor_ids: [1, 2, 4, 6, 7, 8]  # Primary motors only
 
 grippers:
   gripper:
-    motor: gripper
+    motor: 9
     horn_radius: 0.022  # meters
     arm_length: 0.036   # meters
 
-sleep_positions: [0, -1.85, 1.55, 0, 0.8, 0, 0]  # radians
+poses:
+  home: [0.0, -0.3, 0.6, 0.0, -0.3, 0.0]
+  sleep: [0.0, -1.85, 1.55, 0.0, 0.8, 0.0]
+  ready: [0.0, -0.96, 1.16, 0.0, -0.3, 0.0]
 ```
 
-### DynamixelController Implementation
-
-See the complete implementation in the original `aloha_dynamixel_setup.md` file, lines 525-863. The full class is approximately 600 lines and includes:
-
-- Motor initialization
-- Sync read/write operations
-- Shadow motor coordination
-- Register access methods
-- State monitoring thread
-- Torque control
-- Error handling
-
-Key methods:
-- `initialize_motors()` - Configure all motors from YAML
-- `sync_read_positions()` - Read all motor positions efficiently
-- `sync_write_positions(positions)` - Write to multiple motors with shadow coordination
-- `get_joint_positions_radians()` - Get arm joint angles in radians
-- `set_joint_positions_radians(angles)` - Set arm joint angles
-- `start_monitoring(frequency)` - Start background state monitoring
-- `enable_torque()` / `disable_torque()` - Motor control
-
-### Shadow Motor Coordination
-
-**Critical for VX300S:**
-- Motors 2+3 (shoulder) work together for higher torque
-- Motors 4+5 (elbow) work together for higher torque
-- Motor 3 mirrors motor 2, motor 5 mirrors motor 4
-- Must always move in sync to avoid mechanical damage
-
-**Implementation in `sync_write_positions()`:**
-```python
-def sync_write_positions(self, positions):
-    """Write positions with automatic shadow motor coordination."""
-    expanded_positions = positions.copy()
-
-    # Handle shadow motors
-    if 2 in positions:  # If commanding shoulder primary
-        expanded_positions[3] = positions[2]  # Also command shadow
-    if 4 in positions:  # If commanding elbow primary
-        expanded_positions[5] = positions[4]  # Also command shadow
-
-    # Use GroupSyncWrite for efficiency
-    group_sync_write = GroupSyncWrite(
-        self.port_handler, self.packet_handler,
-        self.ADDR_GOAL_POSITION, 4
-    )
-
-    for motor_id, position in expanded_positions.items():
-        position = max(0, min(4095, int(position)))
-        position_bytes = [
-            DXL_LOBYTE(DXL_LOWORD(position)),
-            DXL_HIBYTE(DXL_LOWORD(position)),
-            DXL_LOBYTE(DXL_HIWORD(position)),
-            DXL_HIBYTE(DXL_HIWORD(position))
-        ]
-        group_sync_write.addParam(motor_id, position_bytes)
-
-    group_sync_write.txPacket()
-    group_sync_write.clearParam()
-```
-
----
-
-## Installation
-
-### Prerequisites
-
-- Ubuntu 20.04+ or macOS
-- Python 3.8+
-- Node.js 16+ and npm
-- U2D2 USB adapter connected to /dev/ttyDXL (or /dev/ttyUSB0)
-- VX300S robot hardware
-- 2x Intel RealSense D405 cameras
-
-### Step 1: Install Python Dependencies
-
-```bash
-# Install Dynamixel SDK
-pip3 install dynamixel-sdk
-
-# Install kinematics library
-pip3 install modern-robotics
-
-# Install camera SDK
-pip3 install pyrealsense2
-
-# Install web server dependencies
-pip3 install aiohttp aiohttp-cors
-
-# Install other dependencies
-pip3 install numpy pyyaml
-```
-
-### Step 2: Set Up Serial Port Permissions
-
-```bash
-# Add your user to dialout group
-sudo usermod -aG dialout $USER
-
-# Log out and log back in for changes to take effect
-
-# Verify device exists
-ls -l /dev/ttyDXL  # or /dev/ttyUSB0
-```
-
-### Step 3: Clone and Set Up Repository
-
-```bash
-# Clone your repository
-git clone <your-repo-url>
-cd <your-repo>
-
-# Create config directory
-mkdir -p config
-
-# Copy motor configuration (from existing system or create new)
-# Place vx300s.yaml in config/
-```
-
-### Step 4: Set Up Frontend
-
-```bash
-cd live-api-console
-
-# Install dependencies
-npm install
-
-# Create .env file with Gemini API key
-echo "REACT_APP_GEMINI_API_KEY=your_api_key_here" > .env
-```
-
-### Step 5: Verify Installation
-
-```bash
-# Test Dynamixel connection
-python3 -c "
-from dynamixel_controller import DynamixelController
-dxl = DynamixelController('/dev/ttyDXL', 1000000, 'config/vx300s.yaml')
-dxl.initialize_motors()
-print('Motor positions:', dxl.sync_read_positions())
-dxl.close()
-"
-```
-
----
-
-## Running the System
-
-### Terminal 1: Start Python Bridge
-
-```bash
-cd /path/to/your/repo
-python3 bridges/bridge_aloha_real.py
-```
-
-**Expected output:**
-```
-================================================================
-ALOHA Robot Bridge for Gemini Live API
-================================================================
-
-[Bridge] Initializing Dynamixel SDK...
-Connected to /dev/ttyDXL at 1000000 baud
-Initializing motors...
-  Motor 1: Mode=3, Drive=0, Limits=[0, 4095]
-  Motor 2: Mode=3, Drive=1, Limits=[841, 2867]
-  ...
-Motor initialization complete
-[Bridge] ✓ Dynamixel controller initialized
-[Bridge] Initializing gripper controller...
-[Bridge] ✓ Gripper controller initialized
-[Bridge] Initializing arm controller...
-[Bridge] ✓ Arm controller initialized
-[Bridge] Initializing camera controller...
-[Bridge] ✓ Camera controller initialized
-
-Starting bridge server on http://localhost:8081
-```
-
-### Terminal 2: Start React Frontend
-
-```bash
-cd /path/to/your/repo/live-api-console
-npm start
-```
-
-**Opens browser at:** `http://localhost:3000`
-
-### Using the System
-
-1. **Connect to Gemini:**
-   - Click "Connect" in the UI
-   - Allow microphone access when prompted
-
-2. **Test Voice Commands:**
-   - "Move the arm to home position"
-   - "Open the gripper"
-   - "Move to position x=0.3, y=0, z=0.2"
-   - "Pick up the object at x=0.25, y=0.1"
-
-3. **Monitor Status:**
-   - Check terminal output for robot actions
-   - Use `/status` endpoint: `curl http://localhost:8081/status`
-
----
-
-## Testing
-
-### Unit Tests
-
-**Test DynamixelController:**
-```python
-# test_dynamixel.py
-from dynamixel_controller import DynamixelController
-
-def test_motor_initialization():
-    dxl = DynamixelController('/dev/ttyDXL', 1000000, 'config/vx300s.yaml')
-    dxl.initialize_motors()
-    positions = dxl.sync_read_positions()
-    assert len(positions) == 9
-    dxl.close()
-
-def test_shadow_motors():
-    dxl = DynamixelController('/dev/ttyDXL', 1000000, 'config/vx300s.yaml')
-    dxl.initialize_motors()
-    # Command shoulder primary
-    dxl.sync_write_positions({2: 2500})
-    time.sleep(0.5)
-    positions = dxl.sync_read_positions()
-    # Verify shadow moved too
-    assert abs(positions[2] - positions[3]) < 50  # Should be synchronized
-    dxl.close()
-```
-
-**Test ArmController:**
-```python
-# test_arm_controller.py
-from arm_controller import ArmController
-from dynamixel_controller import DynamixelController
-from vx300s_model import VX300S
-
-def test_joint_movement():
-    dxl = DynamixelController('/dev/ttyDXL', 1000000, 'config/vx300s.yaml')
-    dxl.initialize_motors()
-
-    arm = ArmController(dxl, VX300S())
-    arm.initialize()
-
-    # Test joint movement
-    result = arm.move_joints([0, 0, 0, 0, 0, 0])
-    assert result['success'] == True
-
-    # Test Cartesian movement
-    result = arm.move_to_position([0.3, 0.0, 0.2])
-    assert result['success'] == True
-
-    dxl.close()
-```
-
-### Integration Tests
-
-**Test bridge endpoints:**
-```bash
-# Test status
-curl http://localhost:8081/status
-
-# Test gripper
-curl -X POST http://localhost:8081/aloha-tool-call \
-  -H "Content-Type: application/json" \
-  -d '{"name": "control_gripper", "args": {"action": "open"}}'
-
-# Test arm movement
-curl -X POST http://localhost:8081/aloha-tool-call \
-  -H "Content-Type: application/json" \
-  -d '{"name": "move_arm", "args": {"pose": "home"}}'
-```
-
-### Safety Tests
-
-1. **Workspace Limits:**
-   - Try commanding position outside workspace
-   - Verify rejection
-
-2. **Joint Limits:**
-   - Try commanding joint angles beyond limits
-   - Verify rejection
-
-3. **Emergency Stop:**
-   - Test emergency stop functionality
-   - Verify all motors disabled
+### Critical Configuration Notes
+
+**Shadow Motor Coordination:**
+- Motors 2 ↔ 3 (shoulder) MUST move together
+- Motors 4 ↔ 5 (elbow) MUST move together
+- `DynamixelController.sync_write_positions()` handles this automatically
+- Never command shadow motors independently
+
+**Drive Mode:**
+- `0` = Normal direction
+- `1` = Reversed direction (motors 2, 4, 7)
+- Ensures consistent joint angle directions
+
+**Position Limits:**
+- Prevent mechanical damage
+- Enforced by DynamixelController on every write
+- Values in Dynamixel units (0-4095 for 12-bit resolution)
 
 ---
 
 ## Troubleshooting
 
-### Issue: "Failed to open port /dev/ttyDXL"
+### Issue: "Failed to open port /dev/ttyDXL_follower_right"
 
 **Solution:**
 ```bash
 # Check if device exists
-ls -l /dev/ttyDXL
+ls -l /dev/ttyDXL*
 ls -l /dev/ttyUSB*
 
 # Check permissions
@@ -1143,22 +649,22 @@ groups  # Should include 'dialout'
 sudo usermod -aG dialout $USER
 # Log out and back in
 
-# Try alternative device
-python3 bridge_aloha_real.py --port /dev/ttyUSB0
+# Try alternative device name
+python3 er-setup/bridge_simple_er.py --dxl-port /dev/ttyUSB0
 ```
 
 ### Issue: "Motor not responding" or "Communication error"
 
 **Solution:**
 ```bash
-# Check motor power
+# Check motor power supply
 # Verify U2D2 LED is on
 # Check USB connection
 
 # Test with single motor
 python3 -c "
 from dynamixel_controller import DynamixelController
-dxl = DynamixelController('/dev/ttyDXL', 1000000, 'config/vx300s.yaml')
+dxl = DynamixelController('/dev/ttyDXL_follower_right', 1000000, 'config/vx300s.yaml')
 pos = dxl.read_register(1, 132, 4)  # Read position of motor 1
 print('Motor 1 position:', pos)
 "
@@ -1166,11 +672,23 @@ print('Motor 1 position:', pos)
 
 ### Issue: "IK solution not found"
 
+**Causes:**
+- Target position out of reach
+- Target violates joint limits
+- Singularity in robot configuration
+
 **Solution:**
-- Target position may be out of reach
-- Check workspace limits
-- Try a position closer to current pose
-- Verify robot model (Slist, M) is correct
+```python
+# Check workspace limits
+workspace = {
+    'x': (0.15, 0.50),
+    'y': (-0.30, 0.30),
+    'z': (0.05, 0.40)
+}
+
+# Try position closer to current pose
+# Verify robot model (Slist, M) is correct
+```
 
 ### Issue: "Shadow motors out of sync"
 
@@ -1197,39 +715,51 @@ rs-enumerate-devices
 # Check permissions
 sudo usermod -aG video $USER
 
-# Test with different serial numbers in camera_controller.py
+# Update camera serial numbers in camera_controller.py
+```
+
+### Issue: "GEMINI_API_KEY not set"
+
+**Solution:**
+```bash
+# Check if .env exists
+cat .env
+
+# Create if missing
+echo "GEMINI_API_KEY=your_key_here" > .env
+
+# Or set environment variable
+export GEMINI_API_KEY=your_key_here
 ```
 
 ---
 
-## Pros and Cons
+## Safety Considerations
 
-### Advantages of This System
+### Workspace Limits
 
-✅ **Simplicity:** 3 pip packages vs entire ROS2 stack
-✅ **Performance:** 2-3x lower latency (5-15ms vs 20-40ms)
-✅ **Deployment:** No environment sourcing, single Python process
-✅ **Debugging:** Single process, direct motor visibility
-✅ **Portability:** Runs anywhere Python runs
+Position limits relative to robot base (meters):
+- **X:** 0.15 to 0.50 (forward/backward)
+- **Y:** -0.30 to 0.30 (left/right)
+- **Z:** 0.05 to 0.40 (up/down)
 
-### Tradeoffs
+### Joint Limits (radians)
 
-❌ **Development:** ~1500 lines of custom motor control code
-❌ **Testing:** Need to validate motor configs and shadow synchronization
-❌ **Support:** No Interbotix upstream support
-❌ **Ecosystem:** No RViz, rosbag, or ROS tools
+1. **Waist:** [-π, π] (-180° to 180°)
+2. **Shoulder:** [-1.97, 1.75] (-113° to 100°)
+3. **Elbow:** [-1.52, 1.80] (-87° to 103°)
+4. **Forearm Roll:** [-π, π] (-180° to 180°)
+5. **Wrist Angle:** [-1.74, 2.23] (-100° to 128°)
+6. **Wrist Rotate:** [-π, π] (-180° to 180°)
 
----
+### Safety Rules
 
-## Next Steps
-
-1. **Implement DynamixelController** (2-3 days)
-2. **Refactor ArmController** (1-2 days)
-3. **Refactor GripperController** (0.5-1 day)
-4. **Test thoroughly** (2-3 days)
-5. **Deploy and validate** (1-2 days)
-
-**Total: 7-11 days**
+1. **Always check limits** before commanding motion
+2. **Shadow motors must sync** (2↔3, 4↔5)
+3. **Gripper current limited** to 300mA
+4. **Emergency stop** disables all torque immediately
+5. **Validate IK solutions** before execution
+6. **Use ceremonies** for connect/disconnect (smooth movements)
 
 ---
 
@@ -1240,10 +770,11 @@ sudo usermod -aG video $USER
 - [Dynamixel Protocol 2.0](https://emanual.robotis.com/docs/en/dxl/protocol2/)
 - [XM430 Motor Manual](https://emanual.robotis.com/docs/en/dxl/x/xm430-w350/)
 - [XM540 Motor Manual](https://emanual.robotis.com/docs/en/dxl/x/xm540-w270/)
+- [Gemini Robotics ER API](https://ai.google.dev/gemini-api/docs/robotics-overview)
+- [google-genai Python SDK](https://googleapis.github.io/python-genai/)
 
 ---
 
-**Generated:** 2025-01-13
-**For:** Mobile ALOHA with Gemini 2.5 Flash Live API
+**Last Updated:** 2025-11-20
+**Active Bridge:** `er-setup/bridge_simple_er.py` on port 8082
 **Architecture:** Direct Dynamixel SDK (No ROS2)
-**Documentation:** [Gemini 2.5 Flash Live API (Vertex AI)](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/models/gemini/2-5-flash-live-api)
