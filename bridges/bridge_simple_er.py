@@ -1375,33 +1375,61 @@ async def handle_robot_disconnect(request: web.Request) -> web.Response:
 
 async def handle_robot_status(request: web.Request) -> web.Response:
     """
-    Get current robot connection status and state.
+    Get current robot status for all connected arms.
+
+    Returns multi-arm status with consistent format for all scenarios:
+    - No arms: success=false, error message, empty lists
+    - One+ arms: success=true, connected_arms list, per-arm detailed state
+    - Per-arm errors: arm marked as initialized=false with error message
     """
-    if not dynamixel_controller:
+    # Case 1: Robot not initialized (empty arm_controllers)
+    if not arm_controllers:
         return web.json_response({
-            'connected': False,
-            'initialized': False,
-            'error': 'Robot hardware not initialized'
+            'success': False,
+            'error': 'Robot not initialized',
+            'connected_arms': [],
+            'arm_count': 0
         })
 
+    # Case 2+: At least one arm initialized
     try:
-        # Get current states
-        arm_state = arm_controller.get_arm_state() if arm_controller else None
-        gripper_state = gripper_controller.get_gripper_state() if gripper_controller else None
+        arms_status = {}
+
+        for arm_id, stack in arm_controllers.items():
+            try:
+                # Get arm state from this arm's controller
+                arm_ctrl = stack['arm']
+                state = arm_ctrl.get_arm_state()
+
+                # Successful state read
+                arms_status[arm_id] = {
+                    'port': stack['port'],
+                    'initialized': True,
+                    'state': state
+                }
+            except Exception as e:
+                # Per-arm error handling - mark this arm as failed but continue
+                arms_status[arm_id] = {
+                    'port': stack['port'],
+                    'initialized': False,
+                    'error': str(e)
+                }
 
         return web.json_response({
-            'connected': robot_connected,
-            'initialized': True,
-            'arm_state': arm_state,
-            'gripper_state': gripper_state
+            'success': True,
+            'connected_arms': list(arm_controllers.keys()),
+            'arm_count': len(arm_controllers),
+            'arms': arms_status
         })
 
     except Exception as e:
+        # Unexpected error at top level
         return web.json_response({
-            'connected': robot_connected,
-            'initialized': True,
-            'error': str(e)
-        })
+            'success': False,
+            'error': str(e),
+            'connected_arms': [],
+            'arm_count': 0
+        }, status=500)
 
 
 async def handle_camera_frame(request: web.Request) -> web.Response:

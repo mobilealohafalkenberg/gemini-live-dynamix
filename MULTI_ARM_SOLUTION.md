@@ -708,12 +708,12 @@ def test_arm_parameter_required():
   - [x] Return response with `connected_arms`, `initialization_results`, `arm_count`
   - [x] Add detailed error logging for each initialization failure
 
-- [ ] **Task 2.3:** Add `/status` endpoint
-  - [ ] Create `get_robot_status_handler()` function
-  - [ ] Return list of connected arms
-  - [ ] Return detailed state for each arm
-  - [ ] Handle case of uninitialized robot
-  - [ ] Add route registration: `app.router.add_get('/status', get_robot_status_handler)`
+- [x] **Task 2.3:** Add `/status` endpoint
+  - [x] Create `get_robot_status_handler()` function (enhanced existing `handle_robot_status()`)
+  - [x] Return list of connected arms
+  - [x] Return detailed state for each arm
+  - [x] Handle case of uninitialized robot
+  - [x] Route registration: Using existing `/robot/status` endpoint (avoids conflict with server `/status`)
 
 - [ ] **Task 2.4:** Test bridge initialization
   - [ ] Start bridge with no arms (verify error response)
@@ -918,6 +918,38 @@ Correctly filtered out:
 
 ---
 
+### Phase 2: Bridge Initialization - Tasks 2.1-2.3 COMPLETED (2025-11-20)
+
+**Commits:**
+- `92d8b22` - Implement multi-arm initialization system (Tasks 2.1 & 2.2)
+- [Current] - Add multi-arm status endpoint (Task 2.3)
+
+**Changes (Task 2.3):**
+- Enhanced `handle_robot_status()` function in `bridge_simple_er.py` (lines 1376-1432)
+- Returns multi-arm status with consistent format across all scenarios
+- Uses existing `/robot/status` endpoint (avoids conflict with server `/status`)
+- ~57 lines of code (replaced 29-line function)
+
+**Verification:**
+- ✅ Returns `connected_arms` list for all scenarios
+- ✅ Returns detailed `state` per arm in `arms` dict
+- ✅ Handles uninitialized robot (empty `arm_controllers`)
+- ✅ Per-arm error handling (one arm fails, others still reported)
+- ✅ Consistent response format: `success`, `connected_arms`, `arm_count`, `arms`
+
+**Response Scenarios Covered:**
+1. **No arms initialized** → `success: false`, `error: "Robot not initialized"`, `arm_count: 0`
+2. **One arm** → `success: true`, `arm_count: 1`, single entry in `arms` dict
+3. **Two arms** → `success: true`, `arm_count: 2`, two entries in `arms` dict
+4. **Per-arm error** → Arm marked `initialized: false` with error message, others succeed
+
+**Route Details:**
+- Endpoint: `GET /robot/status` (existing route, enhanced functionality)
+- No route conflicts with server `/status` endpoint
+- Maintains semantic separation: robot status vs bridge status
+
+---
+
 **Last Updated:** 2025-11-20
-**Status:** Phase 1 Complete - Ready for Phase 2 (Bridge Initialization)
-**Estimated Remaining Time:** ~6.5 hours
+**Status:** Phase 2 Tasks 2.1-2.3 Complete - Ready for Task 2.4 (Testing)
+**Estimated Remaining Time:** ~6 hours
