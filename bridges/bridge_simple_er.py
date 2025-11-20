@@ -46,120 +46,229 @@ load_dotenv(dotenv_path=env_path)
 # Key: conversation_id, Value: {history, client, task, step, created_at}
 conversations = {}
 
-# Global controller instances (shared across all requests)
-dynamixel_controller = None
-arm_controller = None
-gripper_controller = None
+# Multi-arm controller management
+# Structure: arm_id -> {'dxl': DynamixelController, 'arm': ArmController,
+#                       'gripper': GripperController, 'port': str, 'model': VX300S}
+arm_controllers = {}
+
+# Shared resources (independent of specific arms)
 camera_controller = None
-robot_model = None
+
+# System state
 robot_connected = False  # Track if robot has completed opening ceremony
 
 
-def initialize_robot(port: str = '/dev/ttyDXL', baudrate: int = 1000000) -> bool:
+async def initialize_robot_handler(request):
     """
-    Initialize robot controllers and hardware.
+    Initialize robot system - detect and initialize all available follower arms.
 
-    Args:
-        port: Serial port for Dynamixel communication
-        baudrate: Communication baudrate (default 1Mbps)
-
-    Returns:
-        True if initialization successful
+    Returns JSON with initialization results and connected arms.
     """
-    global dynamixel_controller, arm_controller, gripper_controller, camera_controller, robot_model
+    global arm_controllers, camera_controller
 
     try:
         print("\n" + "=" * 60)
-        print("[ER Bridge] Initializing Robot Hardware")
+        print("[ER Bridge] Initializing Robot Hardware (Multi-Arm)")
         print("=" * 60)
 
-        # Get config path
+        # Detect follower arms
+        from dynamixel_controller import DynamixelController
+        detected_arms = DynamixelController.detect_follower_ports()
+
+        print(f"\n[Detection] Found {len(detected_arms)} follower arm(s)")
+        for arm_info in detected_arms:
+            print(f"  - {arm_info['arm_id']}: {arm_info['port']}")
+
+        if not detected_arms:
+            error_msg = "No follower arms detected. Check USB connections and udev rules."
+            print(f"\n[ER Bridge] ✗ {error_msg}")
+            return web.json_response({
+                "success": False,
+                "error": error_msg,
+                "connected_arms": [],
+                "arm_count": 0
+            }, status=400)
+
+        # Initialize each detected follower arm
         config_path = Path(__file__).parent.parent / 'config' / 'vx300s.yaml'
+        arm_controllers = {}
+        init_results = {}
 
-        # Initialize robot model (kinematics)
-        print("\n[1/5] Loading robot model...")
-        robot_model = VX300S()
-        robot_info = robot_model.get_info()
-        print(f"  ✓ VX300S model loaded (6-DOF, {robot_info['total_reach']:.2f}m reach)")
+        for arm_info in detected_arms:
+            port = arm_info['port']
+            arm_id = arm_info['arm_id']
 
-        # Initialize Dynamixel controller
-        print(f"\n[2/5] Connecting to Dynamixel bus at {port}...")
-        dynamixel_controller = DynamixelController(
-            port=port,
-            baudrate=baudrate,
-            config_file=str(config_path)
-        )
+            print(f"\n[{arm_id}] Initializing controller stack...")
 
-        if not dynamixel_controller.initialize_motors():
-            raise Exception("Failed to initialize Dynamixel motors")
+            try:
+                # Create robot model
+                print(f"  [1/4] Loading robot model...")
+                robot_model = VX300S()
+                robot_info = robot_model.get_info()
+                print(f"    ✓ VX300S model loaded (6-DOF, {robot_info['total_reach']:.2f}m reach)")
 
-        # Enable torque
-        dynamixel_controller.enable_torque()
+                # Initialize DynamixelController for this arm
+                print(f"  [2/4] Connecting to Dynamixel bus at {port}...")
+                dxl_controller = DynamixelController(
+                    port=port,
+                    baudrate=1000000,
+                    config_file=str(config_path)
+                )
 
-        # Start position monitoring
-        dynamixel_controller.start_monitoring(frequency=10)
-        print(f"  ✓ Dynamixel controller connected, torque enabled, monitoring at 10Hz")
+                if not dxl_controller.initialize_motors():
+                    init_results[arm_id] = False
+                    logging.error(f"Failed to initialize motors for {arm_id}")
+                    print(f"    ✗ Failed to initialize motors")
+                    continue
 
-        # Initialize arm controller (without moving to ready position)
-        print("\n[3/5] Initializing arm controller...")
-        arm_controller = ArmController(
-            dynamixel_controller=dynamixel_controller,
-            robot_model=robot_model,
-            enable_safety=True,
-            dry_run=False
-        )
-        arm_controller.initialize_without_movement()
-        print(f"  ✓ Arm controller ready (awaiting connection for opening ceremony)")
+                dxl_controller.enable_torque()
+                dxl_controller.start_monitoring(frequency=10)
+                print(f"    ✓ Dynamixel controller connected, torque enabled, monitoring at 10Hz")
 
-        # Initialize gripper controller (without auto-close)
-        print("\n[4/5] Initializing gripper controller...")
-        gripper_controller = GripperController(
-            dynamixel_controller=dynamixel_controller,
-            dry_run=False
-        )
-        gripper_controller.initialize()
-        print(f"  ✓ Gripper controller ready (awaiting connection)")
+                # Initialize ArmController
+                print(f"  [3/4] Initializing arm controller...")
+                arm_ctrl = ArmController(
+                    dynamixel_controller=dxl_controller,
+                    robot_model=robot_model,
+                    enable_safety=True,
+                    dry_run=False
+                )
 
-        # Initialize camera controller
-        print("\n[5/5] Initializing camera controller...")
+                if not arm_ctrl.initialize_without_movement():
+                    init_results[arm_id] = False
+                    logging.error(f"Failed to initialize arm controller for {arm_id}")
+                    print(f"    ✗ Failed to initialize arm controller")
+                    continue
+
+                print(f"    ✓ Arm controller ready")
+
+                # Initialize GripperController
+                print(f"  [4/4] Initializing gripper controller...")
+                gripper_ctrl = GripperController(
+                    dynamixel_controller=dxl_controller,
+                    dry_run=False
+                )
+
+                if not gripper_ctrl.initialize():
+                    init_results[arm_id] = False
+                    logging.error(f"Failed to initialize gripper controller for {arm_id}")
+                    print(f"    ✗ Failed to initialize gripper controller")
+                    continue
+
+                print(f"    ✓ Gripper controller ready")
+
+                # Store controller stack
+                arm_controllers[arm_id] = {
+                    'dxl': dxl_controller,
+                    'arm': arm_ctrl,
+                    'gripper': gripper_ctrl,
+                    'port': port,
+                    'model': robot_model
+                }
+
+                init_results[arm_id] = True
+                logging.info(f"✓ Successfully initialized {arm_id} on {port}")
+                print(f"  ✓ {arm_id} fully initialized")
+
+            except Exception as e:
+                init_results[arm_id] = False
+                logging.error(f"✗ Failed to initialize {arm_id}: {e}")
+                print(f"  ✗ {arm_id} initialization failed: {e}")
+                import traceback
+                traceback.print_exc()
+
+        # Initialize cameras (independent of arms)
+        print(f"\n[Cameras] Initializing camera controller...")
         camera_controller = CameraController()
-        camera_controller.initialize()
+        camera_init = camera_controller.initialize()
         print(f"  ✓ Camera controller ready (gripper_cam + top_cam)")
 
+        # Return status
+        connected_arms = [arm_id for arm_id, success in init_results.items() if success]
+
         print("\n" + "=" * 60)
-        print("[ER Bridge] ✓ Robot hardware initialized!")
+        print(f"[ER Bridge] ✓ Initialized {len(connected_arms)} of {len(detected_arms)} detected arm(s)")
+        print(f"[ER Bridge] Connected arms: {', '.join(connected_arms)}")
         print("[ER Bridge] ℹ️  Use /robot/connect to perform opening ceremony")
         print("=" * 60 + "\n")
 
-        return True
+        return web.json_response({
+            "success": len(connected_arms) > 0,
+            "initialization_results": init_results,
+            "connected_arms": connected_arms,
+            "arm_count": len(connected_arms),
+            "camera_initialized": camera_init,
+            "message": f"Initialized {len(connected_arms)} of {len(detected_arms)} detected arm(s)"
+        })
 
     except Exception as e:
+        logging.error(f"Robot initialization failed: {e}")
         print(f"\n[ER Bridge] ✗ Robot initialization failed: {e}")
         import traceback
         traceback.print_exc()
+        return web.json_response({
+            "success": False,
+            "error": str(e),
+            "connected_arms": [],
+            "arm_count": 0
+        }, status=500)
+
+
+def initialize_robot_sync():
+    """
+    Synchronous wrapper for initialize_robot_handler() for use at startup.
+
+    Returns:
+        True if initialization successful, False otherwise
+    """
+    import asyncio
+
+    # Create a fake request object
+    class FakeRequest:
+        pass
+
+    try:
+        # Run the async handler
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        result = loop.run_until_complete(initialize_robot_handler(FakeRequest()))
+        loop.close()
+
+        # Extract success status from JSON response
+        if hasattr(result, 'body'):
+            import json
+            body = json.loads(result.body)
+            return body.get('success', False)
+        return False
+    except Exception as e:
+        print(f"Error during synchronous initialization: {e}")
         return False
 
 
 def shutdown_robot():
     """Safely shutdown robot controllers."""
-    global dynamixel_controller, camera_controller
+    global arm_controllers, camera_controller
 
     print("\n[ER Bridge] Shutting down robot...")
 
+    # Shutdown all arms
+    for arm_id, arm_stack in arm_controllers.items():
+        try:
+            dxl_controller = arm_stack.get('dxl')
+            if dxl_controller:
+                dxl_controller.disable_torque()
+                dxl_controller.close()
+                print(f"  ✓ {arm_id} controller shutdown")
+        except Exception as e:
+            print(f"  ✗ {arm_id} shutdown error: {e}")
+
+    # Shutdown camera controller
     try:
         if camera_controller:
             camera_controller.shutdown()
             print("  ✓ Camera controller shutdown")
     except Exception as e:
         print(f"  ✗ Camera shutdown error: {e}")
-
-    try:
-        if dynamixel_controller:
-            dynamixel_controller.disable_torque()
-            dynamixel_controller.close()
-            print("  ✓ Dynamixel controller shutdown")
-    except Exception as e:
-        print(f"  ✗ Dynamixel shutdown error: {e}")
 
     print("[ER Bridge] Shutdown complete\n")
 
@@ -1363,6 +1472,7 @@ def make_app() -> web.Application:
     })
 
     # Add routes
+    app.router.add_post('/initialize', initialize_robot_handler)
     app.router.add_post('/robotics-er-request', handle_er_request)
     app.router.add_get('/status', handle_status)
     app.router.add_post('/robot/connect', handle_robot_connect)
@@ -1411,7 +1521,7 @@ if __name__ == '__main__':
 
     # Initialize robot hardware
     if not args.no_robot:
-        if not initialize_robot(port=args.dxl_port, baudrate=args.baudrate):
+        if not initialize_robot_sync():
             print("\nERROR: Failed to initialize robot hardware!")
             print("Run with --no-robot flag to start without hardware.")
             sys.exit(1)
@@ -1421,6 +1531,7 @@ if __name__ == '__main__':
 
     print(f"Starting server on http://localhost:{args.port}")
     print("Endpoints:")
+    print("  - POST /initialize        (multi-arm detection and initialization)")
     print("  - POST /robotics-er-request")
     print("      Initial: {prompt}")
     print("      Feedback: {conversation_id, execution_result}")

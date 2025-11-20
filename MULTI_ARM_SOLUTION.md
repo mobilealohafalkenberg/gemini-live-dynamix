@@ -693,20 +693,20 @@ def test_arm_parameter_required():
 
 ### Phase 2: Bridge Initialization (bridge_simple_er.py)
 
-- [ ] **Task 2.1:** Update global state structure
-  - [ ] Replace `dynamixel_controller`, `arm_controller`, `gripper_controller` globals
-  - [ ] Add `arm_controllers = {}` dict
-  - [ ] Keep `camera_controller` global unchanged
+- [x] **Task 2.1:** Update global state structure
+  - [x] Replace `dynamixel_controller`, `arm_controller`, `gripper_controller` globals
+  - [x] Add `arm_controllers = {}` dict
+  - [x] Keep `camera_controller` global unchanged
 
-- [ ] **Task 2.2:** Modify `initialize_robot_handler()`
-  - [ ] Call `DynamixelController.detect_follower_ports()`
-  - [ ] Handle case of no arms detected (return error, not fallback)
-  - [ ] Loop through detected arms
-  - [ ] Initialize controller stack for each arm (VX300S, DynamixelController, ArmController, GripperController)
-  - [ ] Store each stack in `arm_controllers[arm_id]` dict
-  - [ ] Track initialization results per arm
-  - [ ] Return response with `connected_arms`, `initialization_results`, `arm_count`
-  - [ ] Add detailed error logging for each initialization failure
+- [x] **Task 2.2:** Modify `initialize_robot_handler()`
+  - [x] Call `DynamixelController.detect_follower_ports()`
+  - [x] Handle case of no arms detected (return error, not fallback)
+  - [x] Loop through detected arms
+  - [x] Initialize controller stack for each arm (VX300S, DynamixelController, ArmController, GripperController)
+  - [x] Store each stack in `arm_controllers[arm_id]` dict
+  - [x] Track initialization results per arm
+  - [x] Return response with `connected_arms`, `initialization_results`, `arm_count`
+  - [x] Add detailed error logging for each initialization failure
 
 - [ ] **Task 2.3:** Add `/status` endpoint
   - [ ] Create `get_robot_status_handler()` function
