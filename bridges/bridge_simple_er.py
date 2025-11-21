@@ -276,16 +276,25 @@ def shutdown_robot():
 
 async def execute_robot_function(next_action: dict) -> dict:
     """
-    Execute a robot function from Gemini's response.
+    Execute a robot function on specified arm.
 
     Args:
         next_action: Dict with 'function' and 'args' keys
+                    args must include 'arm' parameter for robot functions
 
     Returns:
-        Execution result dict with success, function, args, and result data
+        Execution result dict with success, function, args, arm, and result data
     """
     if not next_action:
         return {'success': False, 'error': 'No action provided'}
+
+    # Check if robot is initialized
+    if not arm_controllers:
+        return {
+            'success': False,
+            'error': 'Robot not initialized',
+            'available_arms': []
+        }
 
     function_name = next_action.get('function')
     args = next_action.get('args', {})
@@ -297,6 +306,35 @@ async def execute_robot_function(next_action: dict) -> dict:
     }
 
     try:
+        # Camera functions don't require arm parameter
+        if function_name == 'capture_camera_frame':
+            result['success'] = True
+            result['message'] = f"Camera frames captured ({args.get('reason', 'unknown')})"
+            return result
+
+        # All other functions require arm parameter
+        arm_id = args.get('arm')
+        if not arm_id:
+            return {
+                'success': False,
+                'error': 'Missing required "arm" parameter',
+                'available_arms': list(arm_controllers.keys())
+            }
+
+        # Get controller stack for specified arm
+        arm_stack = arm_controllers.get(arm_id)
+        if not arm_stack:
+            return {
+                'success': False,
+                'error': f'Arm "{arm_id}" not found',
+                'available_arms': list(arm_controllers.keys())
+            }
+
+        # Extract controllers from stack
+        arm_ctrl = arm_stack['arm']
+        gripper_ctrl = arm_stack['gripper']
+
+        # Route to appropriate function
         if function_name == 'move_arm':
             position = args.get('position')
             pose = args.get('pose')
@@ -306,69 +344,74 @@ async def execute_robot_function(next_action: dict) -> dict:
                 # Move to named pose
                 move_result = await asyncio.get_event_loop().run_in_executor(
                     None,
-                    lambda: arm_controller.move_to_pose(pose, moving_time=moving_time, blocking=True)
+                    lambda: arm_ctrl.move_to_pose(pose, moving_time=moving_time, blocking=True)
                 )
                 result['success'] = move_result.get('success', False)
-                result['message'] = f"Moved to pose '{pose}'"
+                result['arm'] = arm_id
+                result['message'] = f"Moved {arm_id} to pose '{pose}'"
             elif position:
                 # Move to Cartesian position
                 x, y, z = position
                 move_result = await asyncio.get_event_loop().run_in_executor(
                     None,
-                    lambda: arm_controller.move_to_position(x, y, z, moving_time=moving_time, blocking=True)
+                    lambda: arm_ctrl.move_to_position(x, y, z, moving_time=moving_time, blocking=True)
                 )
                 result['success'] = move_result.get('success', False)
+                result['arm'] = arm_id
                 result['new_position'] = position
-                result['message'] = f"Moved to position [{x:.3f}, {y:.3f}, {z:.3f}]"
+                result['message'] = f"Moved {arm_id} to position [{x:.3f}, {y:.3f}, {z:.3f}]"
             else:
                 result['error'] = 'move_arm requires either position or pose argument'
+                result['arm'] = arm_id
 
         elif function_name == 'control_gripper':
             action = args.get('action')
 
             if action == 'open':
                 gripper_result = await asyncio.get_event_loop().run_in_executor(
-                    None, gripper_controller.open_gripper
+                    None, gripper_ctrl.open_gripper
                 )
                 result['success'] = gripper_result.get('success', False)
+                result['arm'] = arm_id
                 result['gripper_state'] = 'open'
-                result['message'] = 'Gripper opened'
+                result['message'] = f'{arm_id} gripper opened'
             elif action == 'close':
                 gripper_result = await asyncio.get_event_loop().run_in_executor(
-                    None, gripper_controller.close_gripper
+                    None, gripper_ctrl.close_gripper
                 )
                 result['success'] = gripper_result.get('success', False)
+                result['arm'] = arm_id
                 result['gripper_state'] = 'closed'
-                result['message'] = 'Gripper closed'
+                result['message'] = f'{arm_id} gripper closed'
             else:
                 result['error'] = f'Invalid gripper action: {action}'
+                result['arm'] = arm_id
 
         elif function_name == 'get_arm_status':
             state = await asyncio.get_event_loop().run_in_executor(
-                None, arm_controller.get_arm_state
+                None, arm_ctrl.get_arm_state
             )
             result['success'] = True
+            result['arm'] = arm_id
             result['arm_state'] = state
-            result['message'] = 'Arm status retrieved'
+            result['message'] = f'{arm_id} status retrieved'
 
         elif function_name == 'get_gripper_status':
             state = await asyncio.get_event_loop().run_in_executor(
-                None, gripper_controller.get_gripper_state
+                None, gripper_ctrl.get_gripper_state
             )
             result['success'] = True
+            result['arm'] = arm_id
             result['gripper_state'] = state
-            result['message'] = 'Gripper status retrieved'
-
-        elif function_name == 'capture_camera_frame':
-            # Camera frames are captured automatically after each action
-            result['success'] = True
-            result['message'] = f"Camera frames captured ({args.get('reason', 'unknown')})"
+            result['message'] = f'{arm_id} gripper status retrieved'
 
         else:
             result['error'] = f'Unknown function: {function_name}'
 
     except Exception as e:
         result['error'] = str(e)
+        if 'arm' in locals():
+            result['arm'] = arm_id
         print(f"[ER Bridge] Function execution error: {e}")
         import traceback
         traceback.print_exc()
