@@ -686,8 +686,8 @@ def test_arm_parameter_required():
 - [x] **Task 1.2:** Test port detection
   - [x] Create test script to call `detect_follower_ports()`
   - [x] Test with no arms connected (verify empty list)
-  - [ ] Test with left arm only (verify single entry)
-  - [ ] Test with right arm only (verify single entry)
+  - [x] Test with left arm only (verify single entry)
+  - [x] Test with right arm only (verify single entry)
   - [x] Test with both arms (verify two entries)
   - [x] Test with leader arms connected (verify they're excluded)
 
