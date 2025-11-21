@@ -715,12 +715,12 @@ def test_arm_parameter_required():
   - [x] Handle case of uninitialized robot
   - [x] Route registration: Using existing `/robot/status` endpoint (avoids conflict with server `/status`)
 
-- [ ] **Task 2.4:** Test bridge initialization
-  - [ ] Start bridge with no arms (verify error response)
-  - [ ] Start bridge with one arm (verify single arm initialized)
-  - [ ] Start bridge with two arms (verify both initialized)
-  - [ ] Test `/status` endpoint after initialization
-  - [ ] Test camera initialization still works
+- [x] **Task 2.4:** Test bridge initialization
+  - [x] Start bridge with no arms (verify error response)
+  - [x] Start bridge with one arm (verify single arm initialized)
+  - [x] Start bridge with two arms (verify both initialized)
+  - [x] Test `/status` endpoint after initialization
+  - [x] Test camera initialization still works
 
 ### Phase 3: Tool Call Routing (bridge_simple_er.py)
 
