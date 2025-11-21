@@ -47,13 +47,18 @@ interface ERStep {
 
 const toolControlGripper: FunctionDeclaration = {
   name: 'control_gripper',
-  description: 'Open or close the robot gripper',
+  description: 'Control the gripper on the specified follower arm',
   parameters: {
     type: Type.OBJECT,
     properties: {
+      arm: {
+        type: Type.STRING,
+        description: 'Follower arm identifier to control gripper on (required)',
+        enum: ['follower_left', 'follower_right']
+      },
       action: { type: Type.STRING, description: 'open or close' },
     },
-    required: ['action'],
+    required: ['arm', 'action'],
   },
 };
 
