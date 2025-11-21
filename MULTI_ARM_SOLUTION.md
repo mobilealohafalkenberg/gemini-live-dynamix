@@ -724,24 +724,24 @@ def test_arm_parameter_required():
 
 ### Phase 3: Tool Call Routing (bridge_simple_er.py)
 
-- [ ] **Task 3.1:** Modify `execute_robot_function()`
-  - [ ] Extract `arm` parameter from `args`
-  - [ ] Return error if `arm` parameter missing (include `available_arms` in response)
-  - [ ] Look up arm in `arm_controllers` dict
-  - [ ] Return error if arm not found (include `available_arms` in response)
-  - [ ] Extract `arm_ctrl` and `gripper_ctrl` from arm stack
-  - [ ] Route `move_arm` calls to correct `arm_ctrl`
-  - [ ] Route `control_gripper` calls to correct `gripper_ctrl`
-  - [ ] Route `get_arm_status` calls to correct `arm_ctrl`
-  - [ ] Include `arm` identifier in all success responses
+- [x] **Task 3.1:** Modify `execute_robot_function()`
+  - [x] Extract `arm` parameter from `args`
+  - [x] Return error if `arm` parameter missing (include `available_arms` in response)
+  - [x] Look up arm in `arm_controllers` dict
+  - [x] Return error if arm not found (include `available_arms` in response)
+  - [x] Extract `arm_ctrl` and `gripper_ctrl` from arm stack
+  - [x] Route `move_arm` calls to correct `arm_ctrl`
+  - [x] Route `control_gripper` calls to correct `gripper_ctrl`
+  - [x] Route `get_arm_status` calls to correct `arm_ctrl`
+  - [x] Include `arm` identifier in all success responses
 
-- [ ] **Task 3.2:** Test tool call routing
-  - [ ] Test `move_arm` without arm parameter (expect error)
-  - [ ] Test `move_arm` with invalid arm (expect error with available_arms)
-  - [ ] Test `move_arm` with valid arm (expect success)
-  - [ ] Test `control_gripper` routing to left arm
-  - [ ] Test `control_gripper` routing to right arm
-  - [ ] Verify left and right commands don't affect each other
+- [x] **Task 3.2:** Test tool call routing
+  - [x] Test `move_arm` without arm parameter (expect error)
+  - [x] Test `move_arm` with invalid arm (expect error with available_arms)
+  - [x] Test `move_arm` with valid arm (expect success)
+  - [x] Test `control_gripper` routing to left arm
+  - [x] Test `control_gripper` routing to right arm
+  - [x] Verify left and right commands don't affect each other
 
 ### Phase 4: Frontend Tool Definitions (ALOHAControl.tsx)
 
