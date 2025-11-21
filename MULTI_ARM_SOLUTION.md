@@ -745,11 +745,11 @@ def test_arm_parameter_required():
 
 ### Phase 4: Frontend Tool Definitions (ALOHAControl.tsx)
 
-- [ ] **Task 4.1:** Update `move_arm` tool definition
-  - [ ] Add `arm` property with type `string`
-  - [ ] Set enum to `["follower_left", "follower_right"]`
-  - [ ] Add `arm` to `required` array
-  - [ ] Update description to mention required arm parameter
+- [x] **Task 4.1:** Update `move_arm` tool definition
+  - [x] Add `arm` property with type `string`
+  - [x] Set enum to `["follower_left", "follower_right"]`
+  - [x] Add `arm` to `required` array
+  - [x] Update description to mention required arm parameter
 
 - [ ] **Task 4.2:** Update `control_gripper` tool definition
   - [ ] Add `arm` property with type `string`

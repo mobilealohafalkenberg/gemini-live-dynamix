@@ -65,41 +65,46 @@ const toolGetGripperStatus: FunctionDeclaration = {
 
 const toolMoveArm: FunctionDeclaration = {
   name: 'move_arm',
-  description: 'Move the robot arm to a target position or pose',
+  description: 'Move the ALOHA robot arm to a target position, joint configuration, or named pose. You must specify which follower arm to control using the \'arm\' parameter.',
   parameters: {
     type: Type.OBJECT,
     properties: {
-      pose: { 
-        type: Type.STRING, 
+      arm: {
+        type: Type.STRING,
+        description: 'Follower arm identifier to control (required)',
+        enum: ['follower_left', 'follower_right']
+      },
+      pose: {
+        type: Type.STRING,
         description: 'Named pose: home, sleep, or ready',
         enum: ['home', 'sleep', 'ready']
       },
-      joints: { 
-        type: Type.ARRAY, 
+      joints: {
+        type: Type.ARRAY,
         description: 'List of 6 joint angles (auto-detects radians or degrees)',
         items: { type: Type.NUMBER }
       },
-      position: { 
-        type: Type.ARRAY, 
+      position: {
+        type: Type.ARRAY,
         description: 'Cartesian position [x,y,z] in meters or [y,x] normalized',
         items: { type: Type.NUMBER }
       },
-      orientation: { 
-        type: Type.ARRAY, 
+      orientation: {
+        type: Type.ARRAY,
         description: 'Optional orientation [roll,pitch,yaw] in radians',
         items: { type: Type.NUMBER }
       },
-      unit: { 
-        type: Type.STRING, 
+      unit: {
+        type: Type.STRING,
         description: 'Unit for joint angles: auto, radians, or degrees',
         enum: ['auto', 'radians', 'degrees']
       },
-      moving_time: { 
-        type: Type.NUMBER, 
+      moving_time: {
+        type: Type.NUMBER,
         description: 'Time to complete movement in seconds'
       }
     },
-    required: [],
+    required: ['arm'],
   },
 };
 
