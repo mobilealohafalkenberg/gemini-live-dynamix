@@ -64,8 +64,18 @@ const toolControlGripper: FunctionDeclaration = {
 
 const toolGetGripperStatus: FunctionDeclaration = {
   name: 'get_gripper_status',
-  description: 'Get current gripper state and position',
-  parameters: { type: Type.OBJECT, properties: {}, required: [] },
+  description: 'Get current gripper state and position for the specified follower arm',
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      arm: {
+        type: Type.STRING,
+        description: 'Follower arm identifier to get gripper status for (required)',
+        enum: ['follower_left', 'follower_right']
+      }
+    },
+    required: ['arm']
+  },
 };
 
 const toolMoveArm: FunctionDeclaration = {
@@ -115,8 +125,18 @@ const toolMoveArm: FunctionDeclaration = {
 
 const toolGetArmStatus: FunctionDeclaration = {
   name: 'get_arm_status',
-  description: 'Get current arm state, joint positions, and end effector pose',
-  parameters: { type: Type.OBJECT, properties: {}, required: [] },
+  description: 'Get current state and position of the specified follower arm',
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      arm: {
+        type: Type.STRING,
+        description: 'Follower arm identifier to get status for (required)',
+        enum: ['follower_left', 'follower_right']
+      }
+    },
+    required: ['arm'],
+  },
 };
 
 // Trajectory-based movement for complex manipulation

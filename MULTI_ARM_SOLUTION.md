@@ -757,11 +757,11 @@ def test_arm_parameter_required():
   - [x] Add `arm` to `required` array
   - [x] Update description to mention required arm parameter
 
-- [ ] **Task 4.3:** Update `get_arm_status` tool definition
-  - [ ] Add `arm` property with type `string`
-  - [ ] Set enum to `["follower_left", "follower_right"]`
-  - [ ] Add `arm` to `required` array
-  - [ ] Update description to mention required arm parameter
+- [x] **Task 4.3:** Update `get_arm_status` tool definition
+  - [x] Add `arm` property with type `string`
+  - [x] Set enum to `["follower_left", "follower_right"]`
+  - [x] Add `arm` to `required` array
+  - [x] Update description to mention required arm parameter
 
 - [ ] **Task 4.4:** Add `get_robot_status` tool (if not exists)
   - [ ] Create tool definition for querying all arms
