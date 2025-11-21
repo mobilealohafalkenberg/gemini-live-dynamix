@@ -763,10 +763,10 @@ def test_arm_parameter_required():
   - [x] Add `arm` to `required` array
   - [x] Update description to mention required arm parameter
 
-- [ ] **Task 4.4:** Add `get_robot_status` tool (if not exists)
-  - [ ] Create tool definition for querying all arms
-  - [ ] No parameters needed (queries all connected arms)
-  - [ ] Update description
+- [x] **Task 4.4:** Add `get_robot_status` tool (if not exists)
+  - [x] Create tool definition for querying all arms
+  - [x] No parameters needed (queries all connected arms)
+  - [x] Update description
 
 - [ ] **Task 4.5:** Test frontend tool definitions
   - [ ] Rebuild frontend

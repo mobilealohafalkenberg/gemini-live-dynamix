@@ -139,6 +139,15 @@ const toolGetArmStatus: FunctionDeclaration = {
   },
 };
 
+const toolGetRobotStatus: FunctionDeclaration = {
+  name: 'get_robot_status',
+  description: 'Get status of all connected follower arms and robot system',
+  parameters: {
+    type: Type.OBJECT,
+    properties: {},
+  },
+};
+
 // Trajectory-based movement for complex manipulation
 const toolMoveArmTrajectory: FunctionDeclaration = {
   name: 'move_arm_trajectory',
@@ -372,6 +381,7 @@ export function ALOHAControl() {
         toolGetGripperStatus,
         toolMoveArm,
         toolGetArmStatus,
+        toolGetRobotStatus,
       ] }],
       systemInstruction: SYSTEM_INSTRUCTION,
     });
