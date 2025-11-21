@@ -20,6 +20,7 @@ Documentation: https://ai.google.dev/gemini-api/docs/robotics-overview
 import os
 import sys
 import json
+import logging
 import time
 import base64
 import uuid
