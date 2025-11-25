@@ -1,9 +1,5 @@
-import { useEffect, useState } from 'react';
-import { useLiveAPIContext } from '../../contexts/LiveAPIContext';
-import { FunctionDeclaration, Type } from '@google/genai';
-import { ApiResponseViewer } from '../api-response-viewer/ApiResponseViewer';
+import { useEffect, useState, useRef } from 'react';
 
-const ROBOT_ENDPOINT = process.env.REACT_APP_ROBOT_ENDPOINT || 'http://localhost:8081';
 const ER_BRIDGE_ENDPOINT = process.env.REACT_APP_ER_BRIDGE_ENDPOINT || 'http://localhost:8082';
 
 // ER Bridge Response Types
@@ -45,320 +41,59 @@ interface ERStep {
   timestamp: string;
 }
 
-const toolControlGripper: FunctionDeclaration = {
-  name: 'control_gripper',
-  description: 'Control the gripper on the specified follower arm',
-  parameters: {
-    type: Type.OBJECT,
-    properties: {
-      arm: {
-        type: Type.STRING,
-        description: 'Follower arm identifier to control gripper on (required)',
-        enum: ['follower_left', 'follower_right']
-      },
-      action: { type: Type.STRING, description: 'open or close' },
-    },
-    required: ['arm', 'action'],
-  },
-};
-
-const toolGetGripperStatus: FunctionDeclaration = {
-  name: 'get_gripper_status',
-  description: 'Get current gripper state and position for the specified follower arm',
-  parameters: {
-    type: Type.OBJECT,
-    properties: {
-      arm: {
-        type: Type.STRING,
-        description: 'Follower arm identifier to get gripper status for (required)',
-        enum: ['follower_left', 'follower_right']
-      }
-    },
-    required: ['arm']
-  },
-};
-
-const toolMoveArm: FunctionDeclaration = {
-  name: 'move_arm',
-  description: 'Move the ALOHA robot arm to a target position, joint configuration, or named pose. You must specify which follower arm to control using the \'arm\' parameter.',
-  parameters: {
-    type: Type.OBJECT,
-    properties: {
-      arm: {
-        type: Type.STRING,
-        description: 'Follower arm identifier to control (required)',
-        enum: ['follower_left', 'follower_right']
-      },
-      pose: {
-        type: Type.STRING,
-        description: 'Named pose: home, sleep, or ready',
-        enum: ['home', 'sleep', 'ready']
-      },
-      joints: {
-        type: Type.ARRAY,
-        description: 'List of 6 joint angles (auto-detects radians or degrees)',
-        items: { type: Type.NUMBER }
-      },
-      position: {
-        type: Type.ARRAY,
-        description: 'Cartesian position [x,y,z] in meters or [y,x] normalized',
-        items: { type: Type.NUMBER }
-      },
-      orientation: {
-        type: Type.ARRAY,
-        description: 'Optional orientation [roll,pitch,yaw] in radians',
-        items: { type: Type.NUMBER }
-      },
-      unit: {
-        type: Type.STRING,
-        description: 'Unit for joint angles: auto, radians, or degrees',
-        enum: ['auto', 'radians', 'degrees']
-      },
-      moving_time: {
-        type: Type.NUMBER,
-        description: 'Time to complete movement in seconds'
-      }
-    },
-    required: ['arm'],
-  },
-};
-
-const toolGetArmStatus: FunctionDeclaration = {
-  name: 'get_arm_status',
-  description: 'Get current state and position of the specified follower arm',
-  parameters: {
-    type: Type.OBJECT,
-    properties: {
-      arm: {
-        type: Type.STRING,
-        description: 'Follower arm identifier to get status for (required)',
-        enum: ['follower_left', 'follower_right']
-      }
-    },
-    required: ['arm'],
-  },
-};
-
-const toolGetRobotStatus: FunctionDeclaration = {
-  name: 'get_robot_status',
-  description: 'Get status of all connected follower arms and robot system',
-  parameters: {
-    type: Type.OBJECT,
-    properties: {},
-  },
-};
-
-// Trajectory-based movement for complex manipulation
-const toolMoveArmTrajectory: FunctionDeclaration = {
-  name: 'move_arm_trajectory',
-  description: 'Execute a multi-point trajectory for complex movements with optional gripper actions',
-  parameters: {
-    type: Type.OBJECT,
-    properties: {
-      trajectory: {
-        type: Type.ARRAY,
-        description: 'Array of waypoints forming the trajectory',
-        items: {
-          type: Type.OBJECT,
-          properties: {
-            point: {
-              type: Type.ARRAY,
-              description: 'Position [x,y,z] in meters or [y,x] normalized (0-1000)',
-              items: { type: Type.NUMBER }
-            },
-            label: {
-              type: Type.STRING,
-              description: 'Descriptive label for this waypoint (e.g., "approach", "grasp", "lift")'
-            },
-            gripper_action: {
-              type: Type.STRING,
-              description: 'Optional gripper action at this waypoint',
-              enum: ['open', 'close', 'maintain']
-            }
-          },
-          required: ['point']
-        }
-      },
-      speed: {
-        type: Type.STRING,
-        description: 'Overall trajectory execution speed',
-        enum: ['slow', 'medium', 'fast']
-      }
-    },
-    required: ['trajectory']
-  }
-};
-
-// Visual object detection and targeting
-const toolDetectAndTarget: FunctionDeclaration = {
-  name: 'detect_and_target_object',
-  description: 'Use visual input to identify objects and generate approach trajectory',
-  parameters: {
-    type: Type.OBJECT,
-    properties: {
-      object_description: {
-        type: Type.STRING,
-        description: 'Natural language description of target object'
-      },
-      action: {
-        type: Type.STRING,
-        description: 'Intended action with the object',
-        enum: ['approach', 'grasp', 'push', 'point_to']
-      },
-      approach_height: {
-        type: Type.NUMBER,
-        description: 'Height offset above object for approach (meters, default 0.05)'
-      }
-    },
-    required: ['object_description', 'action']
-  }
-};
-
-// Scene analysis for spatial understanding
-const toolAnalyzeWorkspace: FunctionDeclaration = {
-  name: 'analyze_workspace',
-  description: 'Analyze current workspace to identify objects and spatial relationships',
-  parameters: {
-    type: Type.OBJECT,
-    properties: {
-      analysis_type: {
-        type: Type.STRING,
-        description: 'Type of analysis to perform',
-        enum: ['object_detection', 'spatial_map', 'obstacle_check']
-      }
-    },
-    required: []
-  }
-};
-
-// Complete autonomous pick-and-place workflow with vision
-const toolPickAndPlace: FunctionDeclaration = {
-  name: 'pick_and_place',
-  description: 'Execute complete autonomous pick-and-place workflow: visually detect object, approach and grasp it, detect target location, move and release. Uses computer vision for object detection and grasp verification.',
-  parameters: {
-    type: Type.OBJECT,
-    properties: {
-      object_to_pick: {
-        type: Type.STRING,
-        description: 'Natural language description of object to pick up (e.g., "banana", "red block", "pen")'
-      },
-      target_location: {
-        type: Type.STRING,
-        description: 'Natural language description of target location to place object (e.g., "bowl", "blue container", "table")'
-      },
-      approach_height: {
-        type: Type.NUMBER,
-        description: 'Height offset above object for approach phase (meters, default 0.05)'
-      },
-      lift_height: {
-        type: Type.NUMBER,
-        description: 'Height to lift object after grasping (meters, default 0.15)'
-      },
-      speed: {
-        type: Type.STRING,
-        description: 'Overall execution speed for the workflow',
-        enum: ['slow', 'medium', 'fast']
-      }
-    },
-    required: ['object_to_pick', 'target_location']
-  }
-};
-
-const SYSTEM_INSTRUCTION = `
-You are an advanced spatial reasoning AI controlling a Mobile ALOHA robot with a 6-DOF arm and gripper. You have continuous visual input from a merged camera view showing both:
-- LEFT GRIPPER camera - mounted on end effector for close-up manipulation
-- TOP VIEW camera - overhead workspace view for spatial understanding
-
-SPATIAL CAPABILITIES:
-- Use visual input to detect, track, and analyze objects in 3D space
-- Generate smooth trajectories for complex manipulation tasks
-- Understand spatial relationships and plan multi-step actions
-- Execute precise pick-and-place operations with visual feedback
-
-AUTONOMOUS WORKFLOWS (HIGHEST LEVEL):
-- pick_and_place(): Complete autonomous pick-and-place with vision
-  * Detects object using computer vision
-  * Approaches, grasps with verification
-  * Detects target location visually
-  * Moves and releases object
-  * Verifies task completion
-  * Use for: "pick the banana and put it in the bowl"
-  * Example: pick_and_place(object_to_pick="banana", target_location="bowl")
-
-TRAJECTORY-BASED CONTROL:
-- move_arm_trajectory(): Execute multi-waypoint paths with labeled steps
-  * Each waypoint can include gripper actions (open/close/maintain)
-  * Use descriptive labels like "approach", "grasp", "lift", "place"
-  * Supports speed control (slow/medium/fast)
-
-- detect_and_target_object(): Identify objects visually and generate approach
-  * Use natural language to describe target objects
-  * Automatically generates appropriate trajectory
-
-- analyze_workspace(): Understand scene layout and spatial relationships
-
-STANDARD CONTROLS:
-- move_arm(): Single-point movements (pose/joints/position)
-- control_gripper(): Open or close gripper
-- get_arm_status() / get_gripper_status(): Query current state
-
-WORKSPACE CONSTRAINTS:
-- x, y: [-0.5, 0.5] meters
-- z: [0.1, 0.6] meters (NEVER go below z=0.1m)
-- Use spatial understanding to avoid collisions
-
-ADVANCED BEHAVIORS:
-- For "pick the banana and put it in the bowl":
-  1. Use pick_and_place(object_to_pick="banana", target_location="bowl")
-  2. System handles detection, grasping, placement, and verification automatically
-
-- For "pick up the red object":
-  1. Use pick_and_place() for autonomous operation, OR
-  2. Use detect_and_target_object() + move_arm_trajectory() for manual control
-
-- For "organize the workspace":
-  1. Analyze spatial layout with analyze_workspace()
-  2. Execute sequential pick_and_place() calls for each object
-
-- For complex custom trajectories:
-  1. Break down into trajectory waypoints
-  2. Label each step for clarity
-  3. Coordinate arm and gripper actions with move_arm_trajectory()
-
-TRAJECTORY FORMAT:
-When using move_arm_trajectory, structure waypoints as:
-[
-  {"point": [x, y, z], "label": "approach", "gripper_action": "open"},
-  {"point": [x, y, z], "label": "grasp_position", "gripper_action": "close"},
-  {"point": [x, y, z], "label": "lift", "gripper_action": "maintain"},
-  {"point": [x, y, z], "label": "place_position", "gripper_action": "open"}
-]
-
-The system automatically converts between coordinate formats and detects angle units.
-`;
-
-interface ApiMessage {
+// Chat message type for the UI
+interface ChatMessage {
+  id: string;
   timestamp: string;
-  type: string;
-  data: any;
+  type: 'user' | 'assistant' | 'system' | 'action' | 'result' | 'connection';
+  content: string;
+  metadata?: {
+    step?: number;
+    action?: ERAction;
+    result?: ERExecutionResult;
+    isError?: boolean;
+    images?: string[];
+    connectionInfo?: ConnectionInfo;
+  };
 }
 
-export function ALOHAControl() {
-  const { client, setConfig, connected } = useLiveAPIContext();
+// Connection info from ER Bridge
+interface ConnectionInfo {
+  connected_arms: string[];
+  arm_count: number;
+  cameras: string[];
+  gemini_api_ready: boolean;
+}
+
+// Props for ALOHAControl
+interface ALOHAControlProps {
+  robotConnected: boolean;
+  connectionInfo?: ConnectionInfo;
+}
+
+// Chat bubble colors
+const CHAT_COLORS = {
+  user: { background: '#3b82f6', text: '#ffffff' },
+  assistant: { background: '#374151', text: '#e5e7eb' },
+  system: { background: 'transparent', text: '#9ca3af' },
+  action: { background: '#1e3a5f', text: '#60a5fa' },
+  connection: { background: '#1e3a5f', text: '#60a5fa' },
+  result: {
+    success: { background: '#064e3b', text: '#34d399' },
+    error: { background: '#7f1d1d', text: '#f87171' },
+  },
+};
+
+export function ALOHAControl({ robotConnected, connectionInfo }: ALOHAControlProps) {
   const [taskStatus, setTaskStatus] = useState('Ready');
-  const [gripperState, setGripperState] = useState<any>({
-    state: 'unknown',
-    position_normalized: 0,
-  });
-  const [armState, setArmState] = useState<any>({
-    state: 'unknown',
-    pose: null,
-    joints_degrees: [0, 0, 0, 0, 0, 0],
-  });
-  const [apiMessages, setApiMessages] = useState<ApiMessage[]>([]);
+  const chatEndRef = useRef<HTMLDivElement>(null);
+
+  // Chat messages state
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
 
   // ER Bridge State
   const [erTaskInput, setErTaskInput] = useState('');
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const [erConversationId, setErConversationId] = useState<string | null>(null);
   const [erSteps, setErSteps] = useState<ERStep[]>([]);
   const [erIsExecuting, setErIsExecuting] = useState(false);
@@ -366,204 +101,135 @@ export function ALOHAControl() {
   const [erCurrentTask, setErCurrentTask] = useState<string>('');
   const [erCameraImages, setErCameraImages] = useState<string[]>([]);
 
-  // Configure tools and system instruction before connecting
+  // Track if we've shown the connection message
+  const [connectionMessageShown, setConnectionMessageShown] = useState(false);
+
+  // Show connection info in chat when robot connects
   useEffect(() => {
-    setConfig({
-      tools: [{ functionDeclarations: [
-        // Autonomous workflows (highest level)
-        toolPickAndPlace,
-        // Trajectory and spatial tools (primary)
-        toolMoveArmTrajectory,
-        toolDetectAndTarget,
-        toolAnalyzeWorkspace,
-        // Standard control tools
-        toolControlGripper,
-        toolGetGripperStatus,
-        toolMoveArm,
-        toolGetArmStatus,
-        toolGetRobotStatus,
-      ] }],
-      systemInstruction: SYSTEM_INSTRUCTION,
-    });
-  }, [setConfig]);
+    if (robotConnected && connectionInfo && !connectionMessageShown) {
+      const connectionMessage: ChatMessage = {
+        id: 'connection-info',
+        timestamp: new Date().toLocaleTimeString(),
+        type: 'connection',
+        content: formatConnectionInfo(connectionInfo),
+        metadata: { connectionInfo }
+      };
+      setChatMessages(prev => [connectionMessage, ...prev.filter(m => m.id !== 'connection-info')]);
+      setConnectionMessageShown(true);
+    } else if (!robotConnected && connectionMessageShown) {
+      // Reset when disconnected
+      setConnectionMessageShown(false);
+    }
+  }, [robotConnected, connectionInfo, connectionMessageShown]);
 
-  // Listen for all API messages
-  useEffect(() => {
-    const handleMessage = (message: any) => {
-      const timestamp = new Date().toLocaleTimeString();
-      setApiMessages(prev => [...prev, {
-        timestamp,
-        type: 'message',
-        data: message
-      }]);
-    };
-
-    const handleToolCall = (toolCall: any) => {
-      const timestamp = new Date().toLocaleTimeString();
-      setApiMessages(prev => [...prev, {
-        timestamp,
-        type: 'toolCall',
-        data: toolCall
-      }]);
-    };
-
-    const handleAudio = (audio: any) => {
-      const timestamp = new Date().toLocaleTimeString();
-      setApiMessages(prev => [...prev, {
-        timestamp,
-        type: 'audio',
-        data: { received: true, size: audio.length }
-      }]);
-    };
-
-    const handleError = (error: any) => {
-      const timestamp = new Date().toLocaleTimeString();
-      setApiMessages(prev => [...prev, {
-        timestamp,
-        type: 'error',
-        data: error
-      }]);
-    };
-
-    const handleOpen = () => {
-      const timestamp = new Date().toLocaleTimeString();
-      setApiMessages(prev => [...prev, {
-        timestamp,
-        type: 'open',
-        data: { status: 'Connected to Gemini API' }
-      }]);
-    };
-
-    const handleClose = () => {
-      const timestamp = new Date().toLocaleTimeString();
-      setApiMessages(prev => [...prev, {
-        timestamp,
-        type: 'close',
-        data: { status: 'Disconnected from Gemini API' }
-      }]);
-    };
-
-    client.on('message', handleMessage);
-    client.on('toolCall', handleToolCall);
-    client.on('audio', handleAudio);
-    client.on('error', handleError);
-    client.on('open', handleOpen);
-    client.on('close', handleClose);
-
-    return () => {
-      client.off('message', handleMessage);
-      client.off('toolCall', handleToolCall);
-      client.off('audio', handleAudio);
-      client.off('error', handleError);
-      client.off('open', handleOpen);
-      client.off('close', handleClose);
-    };
-  }, [client]);
-
-  // Poll robot status periodically to keep UI updated
-  useEffect(() => {
-    const pollStatus = async () => {
-      if (connected) {
-        try {
-          const res = await fetch(`${ROBOT_ENDPOINT}/status`);
-          const data = await res.json();
-          if (data.arm) {
-            setArmState(data.arm);
-          }
-          if (data.gripper) {
-            setGripperState({
-              state: data.gripper.state,
-              position_normalized: (data.gripper.position_percent || 0) / 100
-            });
-          }
-        } catch (e) {
-          console.error('Status poll error:', e);
-        }
-      }
-    };
-
-    const interval = setInterval(pollStatus, 2000); // Poll every 2 seconds
-    return () => clearInterval(interval);
-  }, [connected]);
-
-
-  // Handle tool calls from Gemini
-  useEffect(() => {
-    const handleToolCall = async (toolCall: any) => {
-      console.log('🤖 Tool call received:', toolCall);
-      const responses: any[] = [];
-      
-      for (const call of toolCall.functionCalls || []) {
-        setTaskStatus(`Executing: ${call.name}`);
-        
-        // Always respond to Gemini immediately with success
-        responses.push({ 
-          name: call.name, 
-          id: call.id, 
-          response: { success: true, status: 'executed' } 
-        });
-        
-        // Send to Python bridge asynchronously (fire-and-forget)
-        try {
-          const res = await fetch(`${ROBOT_ENDPOINT}/aloha-tool-call`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name: call.name, args: call.args, id: call.id }),
-          });
-          const data = await res.json();
-          
-          // Update local state with the result
-          if ((call.name === 'get_gripper_status' || call.name === 'control_gripper') && data.result) {
-            setGripperState(data.result);
-            console.log('📊 Gripper state:', data.result);
-          } else if ((call.name === 'get_arm_status' || call.name === 'move_arm') && data.result) {
-            setArmState(data.result);
-            console.log('🦾 Arm state:', data.result);
-          } else if (call.name === 'get_robot_status' && data.result) {
-            // Update both states from combined status
-            if (data.result.gripper) {
-              setGripperState({
-                state: data.result.gripper.state,
-                position_normalized: (data.result.gripper.position_percent || 0) / 100
-              });
-            }
-            if (data.result.arm) {
-              setArmState(data.result.arm);
-            }
-            console.log('🤖 Robot status:', data.result);
-          } else if (data.result) {
-            console.log(`✅ ${call.name} result:`, data.result);
-          }
-        } catch (e: any) {
-          console.error(`❌ Bridge error for ${call.name}:`, e?.message || 'fetch error');
-        }
-      }
-      
-      // Send tool response back to Gemini
-      if (responses.length > 0) {
-        console.log('Sending tool response to Gemini...', responses);
-        client.sendToolResponse(responses);
-      }
-      setTaskStatus('Ready');
-    };
-
-    client.on('toolCall', handleToolCall);
-    return () => {
-      client.off('toolCall', handleToolCall);
-    };
-  }, [client]);
-
-  const executeTask = (text: string) => {
-    if (connected) client.send({ text });
+  // Format connection info for display
+  const formatConnectionInfo = (info: ConnectionInfo): string => {
+    const lines = [
+      'Connected to ER Bridge',
+      `Arms: ${info.connected_arms.length > 0 ? info.connected_arms.join(', ') : 'None detected'}`,
+      `Cameras: ${info.cameras.length > 0 ? info.cameras.join(', ') : 'None'}`,
+      `Gemini ER API: ${info.gemini_api_ready ? 'Ready' : 'Not configured'}`
+    ];
+    return lines.join('\n');
   };
+
+  // Convert ER steps to chat messages
+  useEffect(() => {
+    const messages: ChatMessage[] = [];
+
+    // Keep connection message at the top if it exists
+    const existingConnectionMsg = chatMessages.find(m => m.id === 'connection-info');
+    if (existingConnectionMsg) {
+      messages.push(existingConnectionMsg);
+    }
+
+    // Add user task as message
+    if (erCurrentTask) {
+      messages.push({
+        id: 'task-input',
+        timestamp: new Date().toLocaleTimeString(),
+        type: 'user',
+        content: erCurrentTask,
+      });
+    }
+
+    // Convert each step to chat messages
+    erSteps.forEach((step) => {
+      // Add reasoning
+      if (step.reasoning) {
+        messages.push({
+          id: `step-${step.step}-reasoning`,
+          timestamp: step.timestamp,
+          type: 'assistant',
+          content: step.reasoning,
+          metadata: { step: step.step, images: step.images }
+        });
+      }
+
+      // Add action
+      if (step.action) {
+        messages.push({
+          id: `step-${step.step}-action`,
+          timestamp: step.timestamp,
+          type: 'action',
+          content: `${step.action.function}(${JSON.stringify(step.action.args)})`,
+          metadata: { action: step.action }
+        });
+      }
+
+      // Add result
+      if (step.result) {
+        messages.push({
+          id: `step-${step.step}-result`,
+          timestamp: step.timestamp,
+          type: 'result',
+          content: step.result.message || step.result.error || 'Completed',
+          metadata: { result: step.result, isError: !step.result.success }
+        });
+      }
+    });
+
+    // Add completion message
+    if (erTaskComplete) {
+      messages.push({
+        id: 'task-complete',
+        timestamp: new Date().toLocaleTimeString(),
+        type: 'system',
+        content: 'Task completed',
+      });
+    }
+
+    setChatMessages(messages);
+  }, [erSteps, erCurrentTask, erTaskComplete, chatMessages]);
+
+  // Auto-scroll to bottom when new messages arrive
+  useEffect(() => {
+    if (chatEndRef.current) {
+      chatEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [chatMessages]);
 
   // ER Bridge API Functions
   const sendERTask = async (prompt: string) => {
+    if (!robotConnected) {
+      // Add error message to chat
+      const errorMsg: ChatMessage = {
+        id: `error-${Date.now()}`,
+        timestamp: new Date().toLocaleTimeString(),
+        type: 'system',
+        content: 'Please connect to the robot first',
+        metadata: { isError: true }
+      };
+      setChatMessages(prev => [...prev, errorMsg]);
+      return;
+    }
+
     setErIsExecuting(true);
     setErTaskComplete(false);
     setErSteps([]);
     setErCurrentTask(prompt);
     setErCameraImages([]);
+    setTaskStatus('Sending task...');
 
     try {
       const res = await fetch(`${ER_BRIDGE_ENDPOINT}/robotics-er-request`, {
@@ -576,11 +242,21 @@ export function ALOHAControl() {
 
       if (!data.success) {
         console.error('ER Bridge error:', data.error);
+        const errorMsg: ChatMessage = {
+          id: `error-${Date.now()}`,
+          timestamp: new Date().toLocaleTimeString(),
+          type: 'result',
+          content: data.error || 'Unknown error',
+          metadata: { isError: true }
+        };
+        setChatMessages(prev => [...prev, errorMsg]);
         setErIsExecuting(false);
+        setTaskStatus('Error');
         return;
       }
 
       setErConversationId(data.conversation_id);
+      setTaskStatus(`Step ${data.step}`);
 
       // Add step to history
       const newStep: ERStep = {
@@ -604,20 +280,32 @@ export function ALOHAControl() {
         setErTaskComplete(true);
         setErIsExecuting(false);
         setErConversationId(null);
+        setTaskStatus('Complete');
       } else if (data.execution_result) {
         // Auto-continue with feedback
         await sendERFeedback(data.conversation_id, data.execution_result);
       } else {
         setErIsExecuting(false);
+        setTaskStatus('Ready');
       }
     } catch (e: any) {
       console.error('ER Bridge fetch error:', e?.message || e);
+      const errorMsg: ChatMessage = {
+        id: `error-${Date.now()}`,
+        timestamp: new Date().toLocaleTimeString(),
+        type: 'result',
+        content: `Connection error: ${e?.message || 'Failed to reach ER Bridge'}`,
+        metadata: { isError: true }
+      };
+      setChatMessages(prev => [...prev, errorMsg]);
       setErIsExecuting(false);
+      setTaskStatus('Error');
     }
   };
 
   const sendERFeedback = async (conversationId: string, executionResult: ERExecutionResult) => {
     try {
+      setTaskStatus('Processing feedback...');
       const res = await fetch(`${ER_BRIDGE_ENDPOINT}/robotics-er-request`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -632,8 +320,11 @@ export function ALOHAControl() {
       if (!data.success) {
         console.error('ER Bridge feedback error:', data.error);
         setErIsExecuting(false);
+        setTaskStatus('Error');
         return;
       }
+
+      setTaskStatus(`Step ${data.step}`);
 
       // Add step to history
       const newStep: ERStep = {
@@ -657,15 +348,18 @@ export function ALOHAControl() {
         setErTaskComplete(true);
         setErIsExecuting(false);
         setErConversationId(null);
+        setTaskStatus('Complete');
       } else if (data.execution_result) {
         // Auto-continue with feedback (recursive)
         await sendERFeedback(data.conversation_id, data.execution_result);
       } else {
         setErIsExecuting(false);
+        setTaskStatus('Ready');
       }
     } catch (e: any) {
       console.error('ER Bridge feedback fetch error:', e?.message || e);
       setErIsExecuting(false);
+      setTaskStatus('Error');
     }
   };
 
@@ -678,307 +372,221 @@ export function ALOHAControl() {
     await sendERTask(task);
   };
 
-  const clearERHistory = () => {
+  const clearChat = () => {
     setErSteps([]);
     setErConversationId(null);
     setErTaskComplete(false);
     setErCurrentTask('');
     setErCameraImages([]);
+    // Keep connection message, clear everything else
+    setChatMessages(prev => prev.filter(m => m.id === 'connection-info'));
   };
 
-  // Calculate gripper percentage for display
-  const gripperPercent = (gripperState.position_normalized || 0) * 100;
-  
-  // Determine gripper status emoji
-  const getGripperEmoji = () => {
-    if (gripperState.state === 'open') return '🤚';
-    if (gripperState.state === 'closed') return '✊';
-    if (gripperState.state === 'opening') return '🔄';
-    if (gripperState.state === 'closing') return '🔄';
-    return '❓';
+  // Chat bubble component
+  const ChatBubble = ({ message }: { message: ChatMessage }) => {
+    const isUser = message.type === 'user';
+    const isSystem = message.type === 'system';
+    const isAction = message.type === 'action';
+    const isResult = message.type === 'result';
+    const isConnection = message.type === 'connection';
+    const isError = message.metadata?.isError;
+
+    let background = CHAT_COLORS[message.type as keyof typeof CHAT_COLORS];
+    let textColor = '#e5e7eb';
+
+    if (isResult) {
+      background = isError ? CHAT_COLORS.result.error : CHAT_COLORS.result.success;
+      textColor = (background as any).text;
+    } else if (typeof background === 'object' && 'background' in background) {
+      textColor = background.text;
+      background = background.background as any;
+    }
+
+    return (
+      <div style={{
+        display: 'flex',
+        justifyContent: isUser ? 'flex-end' : isSystem ? 'center' : 'flex-start',
+        marginBottom: 8,
+      }}>
+        <div style={{
+          maxWidth: isSystem ? '100%' : isConnection ? '100%' : '85%',
+          padding: isAction ? '8px 12px' : '10px 14px',
+          borderRadius: 12,
+          background: typeof background === 'string' ? background : '#374151',
+          color: textColor,
+          fontSize: isAction ? 12 : 14,
+          lineHeight: 1.5,
+          fontFamily: isAction ? 'monospace' : 'inherit',
+          whiteSpace: isConnection ? 'pre-line' : 'normal',
+          width: isConnection ? '100%' : 'auto',
+        }}>
+          {isAction && (
+            <span style={{ opacity: 0.6, marginRight: 8 }}>Action:</span>
+          )}
+          {isResult && (
+            <span style={{ marginRight: 8 }}>{isError ? 'Failed:' : 'Success:'}</span>
+          )}
+          {isConnection && (
+            <span style={{ opacity: 0.8, marginRight: 8, fontWeight: 'bold' }}>System:</span>
+          )}
+          <span style={{ fontStyle: isSystem ? 'italic' : 'normal' }}>
+            {message.content}
+          </span>
+          <div style={{ fontSize: 10, opacity: 0.5, marginTop: 4 }}>
+            {message.timestamp}
+          </div>
+        </div>
+      </div>
+    );
   };
 
   return (
     <div style={{ padding: 12, margin: 10, background: '#1f2937', color: 'white', borderRadius: 8 }}>
-      <h3>🤖 ALOHA Robot Control</h3>
-      
-      {/* Status Information */}
-      <div style={{ marginBottom: 12 }}>
-        <div><strong>Connection:</strong> {connected ? '✅ Connected' : '❌ Disconnected'}</div>
-        <div><strong>Task Status:</strong> {taskStatus}</div>
-        <div><strong>Bridge Endpoint:</strong> {ROBOT_ENDPOINT}</div>
+      {/* Minimal Header */}
+      <div style={{
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        marginBottom: 12,
+        paddingBottom: 8,
+        borderBottom: '1px solid #374151'
+      }}>
+        <h3 style={{ margin: 0 }}>Robot Control</h3>
+        <div style={{ fontSize: 12, display: 'flex', gap: 12 }}>
+          <span style={{ color: robotConnected ? '#10b981' : '#ef4444' }}>
+            {robotConnected ? 'Connected' : 'Disconnected'}
+          </span>
+          <span style={{ opacity: 0.6 }}>{taskStatus}</span>
+        </div>
       </div>
 
-      {/* Arm State Display */}
-      <div style={{ background: '#111827', padding: 12, borderRadius: 6, marginBottom: 12 }}>
-        <h4 style={{ margin: '0 0 8px 0' }}>🦾 Arm State</h4>
-        <div><strong>Status:</strong> {armState.state?.toUpperCase() || 'UNKNOWN'}</div>
-        <div><strong>Pose:</strong> {armState.pose || 'custom'}</div>
-        <div><strong>Joints (°):</strong> {armState.joints_degrees ? 
-          armState.joints_degrees.map((j: number) => j.toFixed(1)).join(', ') : 'unknown'}</div>
-      </div>
-
-      {/* Gripper State Display */}
-      <div style={{ background: '#111827', padding: 12, borderRadius: 6, marginBottom: 12 }}>
-        <h4 style={{ margin: '0 0 8px 0' }}>Gripper State {getGripperEmoji()}</h4>
-        <div><strong>Status:</strong> {gripperState.state?.toUpperCase() || 'UNKNOWN'}</div>
-        <div><strong>Position:</strong> {gripperPercent.toFixed(1)}% open</div>
-        
-        {/* Visual Progress Bar */}
-        <div style={{ marginTop: 8 }}>
-          <div style={{ 
-            background: '#374151', 
-            height: 20, 
-            borderRadius: 10,
-            overflow: 'hidden',
-            position: 'relative'
+      {/* Chat Display */}
+      <div style={{
+        background: '#111827',
+        borderRadius: 6,
+        marginBottom: 12,
+        height: 400,
+        overflowY: 'auto',
+        padding: 12,
+      }}>
+        {chatMessages.length === 0 ? (
+          <div style={{
+            textAlign: 'center',
+            opacity: 0.5,
+            padding: 40,
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            height: '100%'
           }}>
-            <div style={{
-              background: gripperState.state === 'closed' ? '#ef4444' : '#10b981',
-              width: `${gripperPercent}%`,
-              height: '100%',
-              transition: 'width 0.3s ease',
-            }} />
-            <div style={{
-              position: 'absolute',
-              top: 0,
-              left: 0,
-              right: 0,
-              textAlign: 'center',
-              lineHeight: '20px',
-              fontSize: 12,
-              fontWeight: 'bold',
-            }}>
-              {gripperPercent.toFixed(0)}%
+            <div style={{ fontSize: 24, marginBottom: 8 }}>
+              {robotConnected ? 'Enter a task below to start' : 'Connect to robot first'}
+            </div>
+            <div style={{ fontSize: 12 }}>
+              {robotConnected
+                ? 'Example: "Pick up the red cube and place it in the bowl"'
+                : 'Use the Connect Robot button below'}
             </div>
           </div>
-        </div>
+        ) : (
+          chatMessages.map((msg) => (
+            <ChatBubble key={msg.id} message={msg} />
+          ))
+        )}
+        <div ref={chatEndRef} />
       </div>
 
-
-      {/* ER Bridge Task Input */}
-      <div style={{ background: '#111827', padding: 12, borderRadius: 6, marginBottom: 12 }}>
-        <h4 style={{ margin: '0 0 8px 0' }}>Gemini ER Task Input</h4>
-        <form onSubmit={handleERTaskSubmit} style={{ display: 'flex', gap: 8 }}>
-          <input
-            type="text"
-            value={erTaskInput}
-            onChange={(e) => setErTaskInput(e.target.value)}
-            placeholder="Enter task (e.g., Pick up the red cube)"
-            disabled={erIsExecuting}
-            style={{
-              flex: 1,
-              padding: '8px 12px',
-              borderRadius: 4,
-              border: '1px solid #374151',
-              background: '#1f2937',
-              color: 'white',
-              fontSize: 14,
-            }}
-          />
-          <button
-            type="submit"
-            disabled={erIsExecuting || !erTaskInput.trim()}
-            style={{
-              padding: '8px 16px',
-              borderRadius: 4,
-              border: 'none',
-              background: erIsExecuting ? '#4b5563' : '#10b981',
-              color: 'white',
-              cursor: erIsExecuting ? 'not-allowed' : 'pointer',
-              fontWeight: 'bold',
-            }}
-          >
-            {erIsExecuting ? 'Running...' : 'Send'}
-          </button>
-        </form>
-        <div style={{ fontSize: 11, opacity: 0.7, marginTop: 4 }}>
-          Bridge: {ER_BRIDGE_ENDPOINT}
-        </div>
-      </div>
-
-      {/* ER Reasoning Display */}
-      {(erSteps.length > 0 || erCurrentTask) && (
-        <div style={{ background: '#111827', padding: 12, borderRadius: 6, marginBottom: 12 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-            <h4 style={{ margin: 0 }}>ER Reasoning</h4>
-            <button
-              onClick={clearERHistory}
-              style={{
-                padding: '4px 8px',
-                fontSize: 11,
-                borderRadius: 4,
-                border: '1px solid #374151',
-                background: 'transparent',
-                color: '#9ca3af',
-                cursor: 'pointer',
-              }}
-            >
-              Clear
-            </button>
-          </div>
-
-          {erCurrentTask && (
-            <div style={{ marginBottom: 8, padding: 8, background: '#1f2937', borderRadius: 4 }}>
-              <strong>Task:</strong> {erCurrentTask}
-              {erTaskComplete && <span style={{ color: '#10b981', marginLeft: 8 }}>Complete</span>}
-              {erIsExecuting && <span style={{ color: '#f59e0b', marginLeft: 8 }}>Executing...</span>}
-            </div>
-          )}
-
-          {/* Camera Images */}
-          {erCameraImages.length > 0 && (
-            <div style={{ marginBottom: 8 }}>
-              <div style={{ fontSize: 12, fontWeight: 'bold', marginBottom: 4 }}>Camera Views</div>
-              <div style={{ display: 'flex', gap: 8 }}>
-                {erCameraImages.map((img, idx) => (
-                  img && (
-                    <div key={idx} style={{ flex: 1 }}>
-                      <div style={{ fontSize: 10, opacity: 0.7, marginBottom: 2 }}>
-                        {idx === 0 ? 'Gripper Cam' : 'Top Cam'}
-                      </div>
-                      <img
-                        src={`data:image/jpeg;base64,${img}`}
-                        alt={idx === 0 ? 'Gripper camera' : 'Top camera'}
-                        style={{
-                          width: '100%',
-                          borderRadius: 4,
-                          border: '1px solid #374151',
-                        }}
-                      />
-                    </div>
-                  )
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Steps History */}
-          <div style={{ maxHeight: 400, overflowY: 'auto' }}>
-            {erSteps.map((step, idx) => (
-              <div
-                key={idx}
-                style={{
-                  marginBottom: 8,
-                  padding: 8,
-                  background: '#1f2937',
-                  borderRadius: 4,
-                  borderLeft: `3px solid ${step.result?.success ? '#10b981' : step.result?.error ? '#ef4444' : '#6366f1'}`,
-                }}
-              >
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
-                  <strong style={{ color: '#6366f1' }}>Step {step.step}</strong>
-                  <span style={{ fontSize: 10, opacity: 0.6 }}>{step.timestamp}</span>
+      {/* Camera Preview (if images available) */}
+      {erCameraImages.length > 0 && (
+        <div style={{
+          display: 'flex',
+          gap: 8,
+          marginBottom: 12,
+          background: '#111827',
+          padding: 8,
+          borderRadius: 6
+        }}>
+          {erCameraImages.map((img, idx) => (
+            img && (
+              <div key={idx} style={{ flex: 1 }}>
+                <div style={{ fontSize: 10, opacity: 0.6, marginBottom: 4 }}>
+                  {idx === 0 ? 'Gripper Cam' : 'Top Cam'}
                 </div>
-
-                {/* Reasoning */}
-                <div style={{ marginBottom: 6, fontSize: 13, lineHeight: 1.4 }}>
-                  {step.reasoning}
-                </div>
-
-                {/* Action */}
-                {step.action && (
-                  <div style={{ marginBottom: 4, fontSize: 12 }}>
-                    <span style={{ color: '#f59e0b' }}>Action:</span>{' '}
-                    <code style={{ background: '#374151', padding: '2px 4px', borderRadius: 2 }}>
-                      {step.action.function}
-                    </code>
-                    {Object.keys(step.action.args).length > 0 && (
-                      <pre style={{
-                        margin: '4px 0 0 0',
-                        padding: 4,
-                        background: '#374151',
-                        borderRadius: 2,
-                        fontSize: 10,
-                        overflow: 'auto',
-                      }}>
-                        {JSON.stringify(step.action.args, null, 2)}
-                      </pre>
-                    )}
-                  </div>
-                )}
-
-                {/* Execution Result */}
-                {step.result && (
-                  <div style={{ fontSize: 12 }}>
-                    <span style={{ color: step.result.success ? '#10b981' : '#ef4444' }}>
-                      {step.result.success ? 'Success' : 'Failed'}:
-                    </span>{' '}
-                    {step.result.message || step.result.error}
-                  </div>
-                )}
-
-                {/* Verification */}
-                {step.verification && (
-                  <div style={{ fontSize: 11, opacity: 0.7, marginTop: 4, fontStyle: 'italic' }}>
-                    Verify: {step.verification}
-                  </div>
-                )}
+                <img
+                  src={`data:image/jpeg;base64,${img}`}
+                  alt={idx === 0 ? 'Gripper camera' : 'Top camera'}
+                  style={{
+                    width: '100%',
+                    borderRadius: 4,
+                    border: '1px solid #374151',
+                  }}
+                />
               </div>
-            ))}
-          </div>
-
-          {erSteps.length === 0 && erIsExecuting && (
-            <div style={{ textAlign: 'center', padding: 16, opacity: 0.6 }}>
-              Waiting for response...
-            </div>
-          )}
+            )
+          ))}
         </div>
       )}
 
-      {/* Manual Control Buttons */}
-      <div style={{ marginBottom: 12 }}>
-        <h4 style={{ margin: '8px 0' }}>Manual Controls</h4>
-        
-        {/* Arm Controls */}
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
-          <button onClick={() => executeTask('Move arm to home position')}>
-            🏠 Home
+      {/* Task Input Bar */}
+      <form onSubmit={handleERTaskSubmit} style={{ display: 'flex', gap: 8 }}>
+        <input
+          type="text"
+          value={erTaskInput}
+          onChange={(e) => setErTaskInput(e.target.value)}
+          placeholder={robotConnected ? "Enter task (e.g., Pick up the red cube)" : "Connect to robot first..."}
+          disabled={erIsExecuting || !robotConnected}
+          style={{
+            flex: 1,
+            padding: '12px 16px',
+            borderRadius: 24,
+            border: '1px solid #374151',
+            background: '#111827',
+            color: 'white',
+            fontSize: 14,
+            outline: 'none',
+            opacity: robotConnected ? 1 : 0.5,
+          }}
+        />
+        <button
+          type="submit"
+          disabled={erIsExecuting || !erTaskInput.trim() || !robotConnected}
+          style={{
+            padding: '12px 24px',
+            borderRadius: 24,
+            border: 'none',
+            background: erIsExecuting || !robotConnected ? '#4b5563' : '#3b82f6',
+            color: 'white',
+            cursor: erIsExecuting || !robotConnected ? 'not-allowed' : 'pointer',
+            fontWeight: 'bold',
+            fontSize: 14,
+          }}
+        >
+          {erIsExecuting ? '...' : 'Send'}
+        </button>
+        {chatMessages.filter(m => m.id !== 'connection-info').length > 0 && (
+          <button
+            type="button"
+            onClick={clearChat}
+            style={{
+              padding: '12px 16px',
+              borderRadius: 24,
+              border: '1px solid #374151',
+              background: 'transparent',
+              color: '#9ca3af',
+              cursor: 'pointer',
+              fontSize: 14,
+            }}
+          >
+            Clear
           </button>
-          <button onClick={() => executeTask('Move arm to ready position')}>
-            ✅ Ready
-          </button>
-          <button onClick={() => executeTask('Move arm to sleep position')}>
-            😴 Sleep
-          </button>
-          <button onClick={() => executeTask('Move arm forward 10 centimeters')}>
-            ⬆️ Forward
-          </button>
-          <button onClick={() => executeTask('Get arm status')}>
-            📊 Arm Status
-          </button>
-        </div>
-        
-        {/* Gripper Controls */}
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          <button onClick={() => executeTask('Open the gripper')}>
-            🤚 Open Gripper
-          </button>
-          <button onClick={() => executeTask('Close the gripper')}>
-            ✊ Close Gripper
-          </button>
-          <button onClick={() => executeTask('Pick up the object in front of you')}>
-            🎯 Pick Object
-          </button>
-        </div>
-      </div>
+        )}
+      </form>
 
-      {/* Voice Command Examples */}
-      <div style={{ marginTop: 12, fontSize: 12, opacity: 0.8 }}>
-        <div><strong>Try saying:</strong></div>
-        <div>• "Move the arm to home position"</div>
-        <div>• "Move forward 20 centimeters"</div>
-        <div>• "Open the gripper and pick up the object"</div>
-        <div>• "Move to position x=0.3, y=0, z=0.2"</div>
-        <div>• "Set joint angles to 0, -55, 66, 0, -17, 0 degrees"</div>
+      {/* Bridge endpoint info */}
+      <div style={{ fontSize: 10, opacity: 0.4, marginTop: 8, textAlign: 'center' }}>
+        ER Bridge: {ER_BRIDGE_ENDPOINT}
       </div>
-
-      {/* API Response Viewer */}
-      <ApiResponseViewer
-        messages={apiMessages}
-        onClear={() => setApiMessages([])}
-      />
     </div>
   );
 }
-

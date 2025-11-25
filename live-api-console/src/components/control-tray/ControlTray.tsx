@@ -1,58 +1,55 @@
 /**
- * Original Control Tray with full voice and video controls
+ * Control Tray - Robot connection controls only
+ * Connects to ER Bridge for robot and Gemini ER API access
  */
 
 import { useEffect, useState } from "react";
-import { useLiveAPIContext } from "../../contexts/LiveAPIContext";
-import { AudioRecorder } from "../../lib/audio-recorder";
 import "./control-tray.scss";
 
-// Robot endpoint configuration
-const ROBOT_ENDPOINT = process.env.REACT_APP_ROBOT_ENDPOINT || 'http://localhost:8082';
+// ER Bridge endpoint configuration
+const ER_BRIDGE_ENDPOINT = process.env.REACT_APP_ER_BRIDGE_ENDPOINT || 'http://localhost:8082';
 
-function ControlTray() {
-  const { client, connected, connect, disconnect, volume } = useLiveAPIContext();
-  const [audioRecorder] = useState(() => new AudioRecorder());
-  const [muted, setMuted] = useState(false);
-  const [inVolume, setInVolume] = useState(0);
-  const [connecting, setConnecting] = useState(false);
-  const [cameraMode, setCameraMode] = useState<'both' | 'gripper' | 'top' | 'merged' | 'none'>('merged');
+// Connection info type (matches ALOHAControl)
+export interface ConnectionInfo {
+  connected_arms: string[];
+  arm_count: number;
+  cameras: string[];
+  gemini_api_ready: boolean;
+}
 
+interface ControlTrayProps {
+  onConnectionChange: (connected: boolean, info?: ConnectionInfo) => void;
+}
+
+function ControlTray({ onConnectionChange }: ControlTrayProps) {
   // Robot connection state
   const [robotConnected, setRobotConnected] = useState(false);
   const [robotConnecting, setRobotConnecting] = useState(false);
+  const [bridgeStatus, setBridgeStatus] = useState<'unknown' | 'online' | 'offline'>('unknown');
 
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      if (audioRecorder) {
-        audioRecorder.stop();
-      }
-    };
-  }, [audioRecorder]);
-
-  // Mute/unmute handling
-  const handleMuteToggle = () => {
-    setMuted(!muted);
-  };
-
-  // Connection handling
-  const handleConnect = async () => {
-    setConnecting(true);
+  // Fetch additional status info after connection
+  const fetchConnectionInfo = async (): Promise<ConnectionInfo | null> => {
     try {
-      // Connect to Gemini
-      await connect();
-    } catch (error) {
-      console.error("Connection failed:", error);
-    } finally {
-      setConnecting(false);
-    }
-  };
+      // Fetch robot status and camera info in parallel
+      const [robotRes, cameraRes, statusRes] = await Promise.all([
+        fetch(`${ER_BRIDGE_ENDPOINT}/robot/status`),
+        fetch(`${ER_BRIDGE_ENDPOINT}/camera/info`),
+        fetch(`${ER_BRIDGE_ENDPOINT}/status`)
+      ]);
 
-  const handleDisconnect = async () => {
-    await disconnect();
-    if (audioRecorder) {
-      audioRecorder.stop();
+      const robotData = await robotRes.json();
+      const cameraData = await cameraRes.json();
+      const statusData = await statusRes.json();
+
+      return {
+        connected_arms: robotData.connected_arms || [],
+        arm_count: robotData.arm_count || 0,
+        cameras: cameraData.cameras || [],
+        gemini_api_ready: statusData.api_key_set || false
+      };
+    } catch (error) {
+      console.error('Failed to fetch connection info:', error);
+      return null;
     }
   };
 
@@ -60,7 +57,7 @@ function ControlTray() {
   const handleRobotConnect = async () => {
     setRobotConnecting(true);
     try {
-      const response = await fetch(`${ROBOT_ENDPOINT}/robot/connect`, {
+      const response = await fetch(`${ER_BRIDGE_ENDPOINT}/robot/connect`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' }
       });
@@ -68,14 +65,20 @@ function ControlTray() {
 
       if (data.success) {
         setRobotConnected(true);
-        console.log('🤖 Robot connected:', data.message);
+        console.log('Robot connected:', data.message);
+
+        // Fetch full connection info
+        const connectionInfo = await fetchConnectionInfo();
+        onConnectionChange(true, connectionInfo || undefined);
       } else {
         console.error('Robot connection failed:', data.error);
         alert(`Robot connection failed: ${data.error}`);
+        onConnectionChange(false);
       }
     } catch (error) {
       console.error('Robot connection error:', error);
       alert(`Robot connection error: ${error}`);
+      onConnectionChange(false);
     } finally {
       setRobotConnecting(false);
     }
@@ -84,7 +87,7 @@ function ControlTray() {
   const handleRobotDisconnect = async () => {
     setRobotConnecting(true);
     try {
-      const response = await fetch(`${ROBOT_ENDPOINT}/robot/disconnect`, {
+      const response = await fetch(`${ER_BRIDGE_ENDPOINT}/robot/disconnect`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' }
       });
@@ -92,7 +95,8 @@ function ControlTray() {
 
       if (data.success) {
         setRobotConnected(false);
-        console.log('🤖 Robot disconnected:', data.message);
+        console.log('Robot disconnected:', data.message);
+        onConnectionChange(false);
       } else {
         console.error('Robot disconnection failed:', data.error);
         alert(`Robot disconnection failed: ${data.error}`);
@@ -105,215 +109,48 @@ function ControlTray() {
     }
   };
 
-  // Check robot connection status on mount
+  // Check bridge status and robot connection on mount
   useEffect(() => {
-    const checkRobotStatus = async () => {
+    const checkStatus = async () => {
       try {
-        const response = await fetch(`${ROBOT_ENDPOINT}/robot/status`);
+        const response = await fetch(`${ER_BRIDGE_ENDPOINT}/status`);
         const data = await response.json();
-        setRobotConnected(data.connected || false);
+        setBridgeStatus('online');
+
+        // Check if robot is already connected
+        if (data.robot_connected) {
+          setRobotConnected(true);
+          const connectionInfo = await fetchConnectionInfo();
+          onConnectionChange(true, connectionInfo || undefined);
+        }
       } catch (error) {
-        console.warn('Could not check robot status:', error);
+        console.warn('ER Bridge not reachable:', error);
+        setBridgeStatus('offline');
         setRobotConnected(false);
+        onConnectionChange(false);
       }
     };
 
-    checkRobotStatus();
-  }, []);
+    checkStatus();
 
-  // Helper function to merge two camera frames horizontally with labels
-  const mergeFrames = async (gripperB64: string, topB64: string): Promise<string> => {
-    return new Promise((resolve) => {
-      const canvas = document.createElement('canvas');
-      const ctx = canvas.getContext('2d');
-      
-      const img1 = new Image();
-      const img2 = new Image();
-      
-      let loadedCount = 0;
-      
-      const onLoad = () => {
-        loadedCount++;
-        if (loadedCount === 2 && ctx) {
-          // Set canvas size (both images side by side)
-          canvas.width = 640 * 2; // 1280 total width
-          canvas.height = 480; // Keep original height
-          
-          // Fill background
-          ctx.fillStyle = '#000000';
-          ctx.fillRect(0, 0, canvas.width, canvas.height);
-          
-          // Draw LEFT GRIPPER camera on the left
-          ctx.drawImage(img1, 0, 0, 640, 480);
-          
-          // Draw TOP camera on the right
-          ctx.drawImage(img2, 640, 0, 640, 480);
-          
-          // Add labels with background for visibility
-          ctx.font = 'bold 24px Arial';
-          ctx.textAlign = 'center';
-          
-          // Left label
-          ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
-          ctx.fillRect(10, 10, 200, 40);
-          ctx.fillStyle = '#00FF00';
-          ctx.fillText('LEFT GRIPPER', 110, 38);
-          
-          // Right label
-          ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
-          ctx.fillRect(650, 10, 200, 40);
-          ctx.fillStyle = '#00FFFF';
-          ctx.fillText('TOP VIEW', 750, 38);
-          
-          // Convert to base64 JPEG
-          const base64 = canvas.toDataURL('image/jpeg', 0.85);
-          resolve(base64.split(',')[1]);
-        }
-      };
-      
-      img1.onload = onLoad;
-      img2.onload = onLoad;
-      img1.src = `data:image/jpeg;base64,${gripperB64}`;
-      img2.src = `data:image/jpeg;base64,${topB64}`;
-    });
-  };
-
-  // Send robot camera frames periodically based on selected mode
-  // Only poll cameras when both Gemini is connected AND robot is connected
-  useEffect(() => {
-    if (!connected || !client || cameraMode === 'none' || !robotConnected) return;
-
-    let timeoutId: number;
-
-    const sendRobotCameraFrames = async () => {
-      try {
-        const framesToSend = [];
-        
-        // Fetch frames based on camera mode
-        if (cameraMode === 'both') {
-          const [gripperRes, topRes] = await Promise.all([
-            fetch(`${ROBOT_ENDPOINT}/camera/gripper_cam/frame`),
-            fetch(`${ROBOT_ENDPOINT}/camera/top_cam/frame`)
-          ]);
-          
-          if (gripperRes.ok && topRes.ok) {
-            const gripperData = await gripperRes.json();
-            const topData = await topRes.json();
-            if (gripperData.success) framesToSend.push({ mimeType: "image/jpeg", data: gripperData.frame });
-            if (topData.success) framesToSend.push({ mimeType: "image/jpeg", data: topData.frame });
-          }
-        } else if (cameraMode === 'merged') {
-          // Fetch both cameras and merge into single frame
-          const [gripperRes, topRes] = await Promise.all([
-            fetch(`${ROBOT_ENDPOINT}/camera/gripper_cam/frame`),
-            fetch(`${ROBOT_ENDPOINT}/camera/top_cam/frame`)
-          ]);
-          
-          if (gripperRes.ok && topRes.ok) {
-            const gripperData = await gripperRes.json();
-            const topData = await topRes.json();
-            
-            if (gripperData.success && topData.success) {
-              const mergedFrame = await mergeFrames(gripperData.frame, topData.frame);
-              framesToSend.push({ mimeType: "image/jpeg", data: mergedFrame });
-              console.log('🎞️ Created merged frame with labels');
-            }
-          }
-        } else if (cameraMode === 'gripper') {
-          const res = await fetch(`${ROBOT_ENDPOINT}/camera/gripper_cam/frame`);
-          if (res.ok) {
-            const data = await res.json();
-            if (data.success) framesToSend.push({ mimeType: "image/jpeg", data: data.frame });
-          }
-        } else if (cameraMode === 'top') {
-          const res = await fetch(`${ROBOT_ENDPOINT}/camera/top_cam/frame`);
-          if (res.ok) {
-            const data = await res.json();
-            if (data.success) framesToSend.push({ mimeType: "image/jpeg", data: data.frame });
-          }
-        }
-        
-        // Send frames if we have any
-        if (framesToSend.length > 0) {
-          client.sendRealtimeInput(framesToSend);
-          console.log(`📸 Sent ${cameraMode} camera(s) to Gemini`);
-        }
-      } catch (e) {
-        console.error('Failed to send robot camera frames:', e);
-      }
-      
-      if (connected) {
-        // Send frames every 500ms (2 FPS) for better spatial reasoning
-        timeoutId = window.setTimeout(sendRobotCameraFrames, 500);
-      }
-    };
-
-    sendRobotCameraFrames();
-
-    return () => {
-      if (timeoutId) {
-        clearTimeout(timeoutId);
-      }
-    };
-  }, [connected, client, cameraMode, robotConnected]);
-
-  // Handle audio recording
-  useEffect(() => {
-    const onData = (base64: string) => {
-      if (connected && client) {
-        client.sendRealtimeInput([{
-          mimeType: "audio/pcm;rate=16000",
-          data: base64,
-        }]);
-      }
-    };
-
-    if (connected && !muted && audioRecorder) {
-      audioRecorder.on("data", onData).on("volume", setInVolume).start();
-    } else if (audioRecorder) {
-      audioRecorder.stop();
-    }
-
-    return () => {
-      if (audioRecorder) {
-        audioRecorder.off("data", onData).off("volume", setInVolume);
-      }
-    };
-  }, [connected, client, muted, audioRecorder]);
+    // Poll status every 5 seconds
+    const interval = setInterval(checkStatus, 5000);
+    return () => clearInterval(interval);
+  }, [onConnectionChange]);
 
   return (
     <div className="control-tray">
       <div className="control-tray-container">
-        {/* Gemini Connection Controls */}
-        <div className="control-group">
-          {!connected ? (
-            <button
-              className="control-button connect-button"
-              onClick={handleConnect}
-              disabled={connecting}
-            >
-              {connecting ? "Connecting..." : "🔌 Connect Gemini"}
-            </button>
-          ) : (
-            <button
-              className="control-button disconnect-button"
-              onClick={handleDisconnect}
-            >
-              ⏹ Disconnect Gemini
-            </button>
-          )}
-        </div>
-
         {/* Robot Connection Controls */}
         <div className="control-group">
           {!robotConnected ? (
             <button
               className="control-button connect-button"
               onClick={handleRobotConnect}
-              disabled={robotConnecting}
-              style={{ backgroundColor: '#2a5a2a' }}
+              disabled={robotConnecting || bridgeStatus === 'offline'}
+              style={{ backgroundColor: bridgeStatus === 'offline' ? '#4b5563' : '#2a5a2a' }}
             >
-              {robotConnecting ? "🤖 Connecting..." : "🤖 Connect Robot"}
+              {robotConnecting ? "Connecting..." : bridgeStatus === 'offline' ? "Bridge Offline" : "Connect Robot"}
             </button>
           ) : (
             <button
@@ -322,84 +159,18 @@ function ControlTray() {
               disabled={robotConnecting}
               style={{ backgroundColor: '#5a2a2a' }}
             >
-              {robotConnecting ? "🤖 Disconnecting..." : "🤖 Disconnect Robot"}
+              {robotConnecting ? "Disconnecting..." : "Disconnect Robot"}
             </button>
           )}
         </div>
 
-        {/* Camera Selection */}
-        {connected && (
-          <div className="control-group">
-            <label style={{ fontSize: '12px', color: '#888', marginBottom: '4px' }}>
-              Camera Feed:
-            </label>
-            <select 
-              value={cameraMode} 
-              onChange={(e) => setCameraMode(e.target.value as any)}
-              style={{
-                padding: '8px',
-                borderRadius: '4px',
-                border: '1px solid #333',
-                background: '#2a2a2a',
-                color: 'white',
-                fontSize: '14px',
-                marginBottom: '8px',
-                width: '100%'
-              }}
-            >
-              <option value="merged">Merged View (Recommended)</option>
-              <option value="both">Both Cameras (Separate)</option>
-              <option value="gripper">Gripper Only</option>
-              <option value="top">Top Only</option>
-              <option value="none">No Camera</option>
-            </select>
-          </div>
-        )}
-
-        {/* Voice Controls */}
-        {connected && (
-          <div className="control-group">
-            <button
-              className={`control-button ${muted ? 'muted' : ''}`}
-              onClick={handleMuteToggle}
-            >
-              {muted ? '🔇 Unmute' : '🎤 Mute'}
-            </button>
-            
-            {/* Volume indicators */}
-            <div className="volume-indicators">
-              <div className="volume-bar">
-                <span className="volume-label">In</span>
-                <div className="volume-meter">
-                  <div 
-                    className="volume-level"
-                    style={{ width: `${inVolume * 100}%` }}
-                  />
-                </div>
-              </div>
-              <div className="volume-bar">
-                <span className="volume-label">Out</span>
-                <div className="volume-meter">
-                  <div 
-                    className="volume-level"
-                    style={{ width: `${volume * 100}%` }}
-                  />
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-
         {/* Status Indicators */}
         <div className="status-indicators">
           <span className="status-item">
-            Gemini: {connected ? '🟢' : '🔴'}
+            Bridge: {bridgeStatus === 'online' ? 'Online' : bridgeStatus === 'offline' ? 'Offline' : 'Checking...'}
           </span>
           <span className="status-item">
-            Robot: {robotConnected ? '🟢' : '🔴'}
-          </span>
-          <span className="status-item">
-            Audio: {!muted && connected ? '🎤' : '🔇'}
+            Robot: {robotConnected ? 'Connected' : 'Disconnected'}
           </span>
         </div>
       </div>

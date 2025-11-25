@@ -46,51 +46,6 @@
   }
 }
 
-@property --volume {
-  syntax: "length";
-  inherit: false;
-  initial-value: 0px;
-}
-
-.disabled .mic-button,
-.mic-button.disabled {
-  &:before {
-    background: rgba(0, 0, 0, 0);
-  }
-}
-
-.mic-button {
-  position: relative;
-  background-color: var(--accent-red);
-  z-index: 1;
-  color: black;
-  transition: all 0.2s ease-in;
-
-  &:focus {
-    border: 2px solid var(--Neutral-20);
-    outline: 2px solid var(--Red-500);
-  }
-
-  &:hover {
-    background-color: var(--Red-400);
-  }
-
-  &:before {
-    position: absolute;
-    z-index: -1;
-    top: calc(var(--volume) * -1);
-    left: calc(var(--volume) * -1);
-    display: block;
-    content: "";
-    opacity: 0.35;
-    background-color: var(--Red-500);
-    width: calc(100% + var(--volume) * 2);
-    height: calc(100% + var(--volume) * 2);
-    border-radius: 24px;
-    transition: all 0.02s ease-in-out;
-  }
-}
-
 .connect-toggle {
   &:focus {
     border: 2px solid var(--Neutral-20);

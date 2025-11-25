@@ -1,47 +1,48 @@
 /**
- * Minimal ALOHA Gripper Control App
- * Stripped down to essentials - just gripper control via Gemini Live API
+ * ALOHA Robot Control App
+ * Uses Gemini ER Robotics API via ER Bridge for robot control
  */
 
+import { useState, useCallback } from "react";
 import "./App.scss";
-import { LiveAPIProvider } from "./contexts/LiveAPIContext";
 import { ALOHAControl } from "./components/aloha-control/ALOHAControl";
-import ControlTray from "./components/control-tray/ControlTray";
+import ControlTray, { ConnectionInfo } from "./components/control-tray/ControlTray";
 import { DualCameraView } from "./components/camera-feed/CameraFeed";
-import { LiveClientOptions } from "./types";
-
-const API_KEY = process.env.REACT_APP_GEMINI_API_KEY as string;
-if (typeof API_KEY !== "string") {
-  throw new Error("set REACT_APP_GEMINI_API_KEY in .env");
-}
-
-const apiOptions: LiveClientOptions = {
-  apiKey: API_KEY,
-};
 
 function App() {
+  // Connection state lifted to App level
+  const [robotConnected, setRobotConnected] = useState(false);
+  const [connectionInfo, setConnectionInfo] = useState<ConnectionInfo | undefined>(undefined);
+
+  // Handle connection changes from ControlTray
+  const handleConnectionChange = useCallback((connected: boolean, info?: ConnectionInfo) => {
+    setRobotConnected(connected);
+    setConnectionInfo(info);
+  }, []);
+
   return (
     <div className="App">
-      <LiveAPIProvider options={apiOptions}>
-        <div className="streaming-console">
-          <main style={{ width: '100%' }}>
-            <div className="main-app-area">
-              <h1 style={{ color: 'white', textAlign: 'center', margin: '20px 0' }}>
-                🤖 ALOHA Gripper Control
-              </h1>
+      <div className="streaming-console">
+        <main style={{ width: '100%' }}>
+          <h1 id="title" style={{ color: 'white', textAlign: 'center', margin: '20px 0' }}>
+            ALOHA Robot Control
+          </h1>
 
-              {/* Main gripper control component */}
-              <ALOHAControl />
+          <div className="main-app-area">
+            {/* Main robot control component */}
+            <ALOHAControl
+              robotConnected={robotConnected}
+              connectionInfo={connectionInfo}
+            />
 
-              {/* Robot camera feeds */}
-              <DualCameraView enabled={true} />
-            </div>
+            {/* Robot camera feeds */}
+            <DualCameraView enabled={robotConnected} />
+          </div>
 
-            {/* Control tray with voice and connection controls */}
-            <ControlTray />
-          </main>
-        </div>
-      </LiveAPIProvider>
+          {/* Control tray with connection controls */}
+          <ControlTray onConnectionChange={handleConnectionChange} />
+        </main>
+      </div>
     </div>
   );
 }
