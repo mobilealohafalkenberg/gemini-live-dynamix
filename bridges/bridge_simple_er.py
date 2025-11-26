@@ -59,6 +59,75 @@ camera_controller = None
 robot_connected = False  # Track if robot has completed opening ceremony
 
 
+def build_tool_definitions(connected_arms: list) -> str:
+    """
+    Generate tool definitions with available arm(s) listed dynamically.
+
+    Args:
+        connected_arms: List of connected arm IDs (e.g., ['follower_right', 'follower_left'])
+
+    Returns:
+        String containing tool definitions for the system prompt
+    """
+    if not connected_arms:
+        return "NO ARMS CONNECTED - Robot functions unavailable"
+
+    arm_list = ', '.join(f'"{a}"' for a in connected_arms)
+    arm_count = len(connected_arms)
+    arm_plural = "arm" if arm_count == 1 else "arms"
+    first_arm = connected_arms[0]
+
+    return f'''CONNECTED ARM(S): [{arm_list}]
+
+AVAILABLE ROBOT FUNCTIONS:
+
+def move_arm(arm: str, position: list[float] = None, pose: str = None, moving_time: float = 1.5):
+    \'\'\'Move robot end effector to target position or named pose.
+
+    Args:
+        arm: Target {arm_plural} - one of: {arm_list} (REQUIRED)
+        position: Target position [x, y, z] in meters (use this OR pose)
+        pose: Named pose - "home" [0, 0, 0.5], "ready" [0.3, 0, 0.3], or "sleep" [0, 0, 0.1] (use this OR position)
+        moving_time: Time to complete movement in seconds (default: 1.5)
+
+    Example: {{"function": "move_arm", "args": {{"arm": "{first_arm}", "position": [0.3, -0.1, 0.2]}}}}
+    Example: {{"function": "move_arm", "args": {{"arm": "{first_arm}", "pose": "home"}}}}
+    \'\'\'
+
+def control_gripper(arm: str, action: str):
+    \'\'\'Open or close the robot gripper.
+
+    Args:
+        arm: Target {arm_plural} - one of: {arm_list} (REQUIRED)
+        action: "open" or "close"
+
+    Example: {{"function": "control_gripper", "args": {{"arm": "{first_arm}", "action": "open"}}}}
+    \'\'\'
+
+def get_arm_status(arm: str):
+    \'\'\'Get current arm state (joints, position, pose).
+
+    Args:
+        arm: Target {arm_plural} - one of: {arm_list} (REQUIRED)
+
+    Returns: Dictionary with joint angles, end-effector position, current pose
+
+    Example: {{"function": "get_arm_status", "args": {{"arm": "{first_arm}"}}}}
+    \'\'\'
+
+def get_gripper_status(arm: str):
+    \'\'\'Get current gripper state.
+
+    Args:
+        arm: Target {arm_plural} - one of: {arm_list} (REQUIRED)
+
+    Returns: Dictionary with gripper position and state
+
+    Example: {{"function": "get_gripper_status", "args": {{"arm": "{first_arm}"}}}}
+    \'\'\'
+'''
+
+
 async def initialize_robot_handler(request):
     """
     Initialize robot system - detect and initialize all available follower arms.
@@ -694,44 +763,7 @@ CRITICAL: Images will always appear in the order above. First image = gripper vi
           Use GRIPPER CAMERA to verify if an object is grasped.
           Use OVERHEAD CAMERA for spatial relationships and planning.
 
-AVAILABLE ROBOT FUNCTIONS:
-
-def move_arm(position: list[float] = None, pose: str = None, moving_time: float = 1.5):
-    '''Move robot end effector to target position or named pose.
-
-    Args:
-        position: Target position [x, y, z] in meters (use this OR pose)
-        pose: Named pose - "home" [0, 0, 0.5], "ready" [0.3, 0, 0.3], or "sleep" [0, 0, 0.1] (use this OR position)
-        moving_time: Time to complete movement in seconds (default: 1.5)
-
-    Example: {{"function": "move_arm", "args": {{"position": [0.3, -0.1, 0.2]}}}}
-    Example: {{"function": "move_arm", "args": {{"pose": "home"}}}}
-    '''
-
-def control_gripper(action: str):
-    '''Open or close the robot gripper.
-
-    Args:
-        action: "open" or "close"
-
-    Example: {{"function": "control_gripper", "args": {{"action": "open"}}}}
-    '''
-
-def get_arm_status():
-    '''Get current arm state (joints, position, pose).
-
-    Returns: Dictionary with joint angles, end-effector position, current pose
-
-    Example: {{"function": "get_arm_status", "args": {{}}}}
-    '''
-
-def get_gripper_status():
-    '''Get current gripper state.
-
-    Returns: Dictionary with gripper position and state
-
-    Example: {{"function": "get_gripper_status", "args": {{}}}}
-    '''
+{build_tool_definitions(list(arm_controllers.keys()))}
 
 def capture_camera_frame(reason: str):
     '''Capture fresh camera frames from gripper and overhead cameras.
