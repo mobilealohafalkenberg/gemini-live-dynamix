@@ -139,7 +139,9 @@ class GripperController:
                 return False
 
             # Set current limit for safe grasping (300mA)
+            # NOTE: ADDR_CURRENT_LIMIT is an EEPROM register - can only write with torque OFF
             print("[GripperController] Configuring gripper motor...")
+            self.dxl.disable_torque([self.gripper_motor_id])
             self.dxl.write_register(
                 self.gripper_motor_id,
                 self.dxl.ADDR_CURRENT_LIMIT,
