@@ -26,18 +26,32 @@ import base64
 import uuid
 import asyncio
 from pathlib import Path
-from aiohttp import web
+from aiohttp import web, WSMsgType
 from aiohttp_cors import setup, ResourceOptions
 from dotenv import load_dotenv
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from dynamixel_controller import DynamixelController
-from models.vx300s_model import VX300S
-from controllers.arm_controller import ArmController
-from controllers.gripper_controller import GripperController
-from controllers.camera_controller import CameraController
+# Robot hardware imports - optional, only needed when running with actual robot
+# These will be None if imports fail (e.g., missing dynamixel_sdk)
+DynamixelController = None
+VX300S = None
+ArmController = None
+GripperController = None
+CameraController = None
+
+try:
+    from dynamixel_controller import DynamixelController
+    from models.vx300s_model import VX300S
+    from controllers.arm_controller import ArmController
+    from controllers.gripper_controller import GripperController
+    from controllers.camera_controller import CameraController
+    ROBOT_HARDWARE_AVAILABLE = True
+except ImportError as e:
+    print(f"[Bridge] Robot hardware modules not available: {e}")
+    print("[Bridge] Running in no-robot mode only")
+    ROBOT_HARDWARE_AVAILABLE = False
 
 # Load .env file from project root
 env_path = Path(__file__).parent.parent / '.env'
@@ -57,6 +71,51 @@ camera_controller = None
 
 # System state
 robot_connected = False  # Track if robot has completed opening ceremony
+
+# WebSocket client management
+ws_clients: set = set()  # Connected WebSocket clients
+ws_sequence = 0  # Message sequence number for ordering
+
+
+async def send_ws(ws: web.WebSocketResponse, msg_type: str, payload: dict):
+    """Send a typed message to a single WebSocket client."""
+    global ws_sequence
+    ws_sequence += 1
+    try:
+        await ws.send_json({
+            'type': msg_type,
+            'timestamp': int(time.time() * 1000),
+            'sequence': ws_sequence,
+            'payload': payload
+        })
+    except Exception as e:
+        print(f"[WebSocket] Send error: {e}")
+        ws_clients.discard(ws)
+
+
+async def broadcast_ws(msg_type: str, payload: dict):
+    """Broadcast a message to all connected WebSocket clients."""
+    global ws_sequence
+    if not ws_clients:
+        return
+
+    ws_sequence += 1
+    message = {
+        'type': msg_type,
+        'timestamp': int(time.time() * 1000),
+        'sequence': ws_sequence,
+        'payload': payload
+    }
+
+    disconnected = set()
+    for ws in ws_clients:
+        try:
+            await ws.send_json(message)
+        except Exception as e:
+            print(f"[WebSocket] Broadcast error: {e}")
+            disconnected.add(ws)
+
+    ws_clients.difference_update(disconnected)
 
 
 def build_tool_definitions(connected_arms: list) -> str:
@@ -549,6 +608,516 @@ def get_current_robot_state() -> dict:
         print(f"[ER Bridge] Error getting robot state: {e}")
 
     return state
+
+
+# =============================================================================
+# WebSocket Handler and Message Routing
+# =============================================================================
+
+async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
+    """
+    Main WebSocket endpoint for unified client communication.
+
+    Handles:
+    - Task requests and execution
+    - Camera frame streaming
+    - Robot status updates
+    - Connection lifecycle
+    """
+    ws = web.WebSocketResponse(heartbeat=30.0)
+    await ws.prepare(request)
+
+    # Register client
+    ws_clients.add(ws)
+    client_id = id(ws)
+    print(f"[WebSocket] Client {client_id} connected. Total: {len(ws_clients)}")
+
+    # Send connection info
+    await send_ws(ws, 'connection_info', {
+        'cameras': ['gripper_cam', 'top_cam'] if camera_controller and camera_controller.initialized else [],
+        'connected_arms': list(arm_controllers.keys()),
+        'robot_connected': robot_connected
+    })
+
+    try:
+        async for msg in ws:
+            if msg.type == WSMsgType.TEXT:
+                try:
+                    data = json.loads(msg.data)
+                    await handle_ws_message(ws, data)
+                except json.JSONDecodeError as e:
+                    await send_ws(ws, 'error', {'code': 'PARSE_ERROR', 'message': str(e)})
+            elif msg.type == WSMsgType.ERROR:
+                print(f"[WebSocket] Client {client_id} error: {ws.exception()}")
+    finally:
+        ws_clients.discard(ws)
+        print(f"[WebSocket] Client {client_id} disconnected. Total: {len(ws_clients)}")
+
+    return ws
+
+
+async def handle_ws_message(ws: web.WebSocketResponse, data: dict):
+    """Route incoming WebSocket messages to appropriate handlers."""
+    msg_type = data.get('type')
+    payload = data.get('payload', {})
+
+    print(f"[WebSocket] Received: {msg_type}")
+
+    if msg_type == 'task_request':
+        await handle_ws_task_request(ws, payload)
+    elif msg_type == 'robot_connect':
+        await handle_ws_robot_connect(ws)
+    elif msg_type == 'robot_disconnect':
+        await handle_ws_robot_disconnect(ws)
+    elif msg_type == 'status_request':
+        await handle_ws_status_request(ws)
+    else:
+        await send_ws(ws, 'error', {
+            'code': 'UNKNOWN_MESSAGE',
+            'message': f'Unknown message type: {msg_type}'
+        })
+
+
+async def handle_ws_task_request(ws: web.WebSocketResponse, payload: dict):
+    """Handle task request via WebSocket - stream results back."""
+    prompt = payload.get('prompt', '')
+    if not prompt:
+        await send_ws(ws, 'error', {'code': 'INVALID_PROMPT', 'message': 'Missing prompt'})
+        return
+
+    print(f"\n{'=' * 60}")
+    print(f"[WebSocket] NEW TASK: {prompt}")
+    print(f"{'=' * 60}")
+
+    # Capture and broadcast camera images
+    images = capture_camera_images()
+    await send_ws(ws, 'camera_frame', {
+        'gripper_cam': images[0] if len(images) > 0 else '',
+        'top_cam': images[1] if len(images) > 1 else ''
+    })
+
+    # Get current robot state
+    current_state = get_current_robot_state()
+
+    # Check API key
+    api_key = os.getenv('GEMINI_API_KEY')
+    if not api_key:
+        await send_ws(ws, 'error', {'code': 'NO_API_KEY', 'message': 'GEMINI_API_KEY not set'})
+        return
+
+    # Initialize Gemini client
+    client = genai.Client(api_key=api_key)
+    conversation_id = str(uuid.uuid4())
+
+    # Build context prompt (reuse existing logic)
+    context_prompt = build_context_prompt(prompt, current_state)
+
+    # Build content parts
+    content_parts = [types.Part(text=context_prompt)]
+
+    # Add images
+    for img_b64 in images:
+        if img_b64 and img_b64.strip():
+            image_bytes = base64.b64decode(img_b64)
+            image_part = types.Part.from_bytes(data=image_bytes, mime_type='image/jpeg')
+            content_parts.append(image_part)
+
+    # Initialize conversation history
+    conversation_history = [
+        types.Content(role='user', parts=content_parts)
+    ]
+
+    # Store conversation
+    conversations[conversation_id] = {
+        'history': conversation_history,
+        'client': client,
+        'task': prompt,
+        'step': 0,
+        'created_at': time.time(),
+        'ws': ws  # Track which WebSocket initiated this
+    }
+
+    # Execute task loop
+    await execute_task_loop(ws, conversation_id)
+
+
+async def execute_task_loop(ws: web.WebSocketResponse, conversation_id: str):
+    """Execute task steps in a loop, streaming results via WebSocket."""
+    if conversation_id not in conversations:
+        await send_ws(ws, 'error', {'code': 'NO_CONVERSATION', 'message': 'Conversation not found'})
+        return
+
+    conv = conversations[conversation_id]
+    max_steps = 20  # Safety limit
+
+    while conv['step'] < max_steps:
+        conv['step'] += 1
+        step = conv['step']
+
+        print(f"\n[WebSocket] Executing step {step}...")
+
+        # Call Gemini
+        try:
+            response = conv['client'].models.generate_content(
+                model='gemini-robotics-er-1.5-preview',
+                contents=conv['history'],
+                config=types.GenerateContentConfig(
+                    temperature=0.1,
+                    thinking_config=types.ThinkingConfig(thinking_budget=0)
+                )
+            )
+        except Exception as e:
+            await send_ws(ws, 'error', {'code': 'GEMINI_ERROR', 'message': str(e)})
+            break
+
+        # Parse response
+        result = parse_iterative_response(response)
+
+        # Store assistant response in history
+        if response.candidates and len(response.candidates) > 0:
+            conv['history'].append(response.candidates[0].content)
+
+        # Send reasoning
+        if result.get('reasoning'):
+            await send_ws(ws, 'reasoning', {
+                'text': result['reasoning'],
+                'step': step,
+                'conversation_id': conversation_id
+            })
+
+        # Check if task complete
+        if result.get('task_complete', False):
+            await send_ws(ws, 'task_complete', {
+                'conversation_id': conversation_id,
+                'total_steps': step
+            })
+            # Cleanup
+            conv['client'].close()
+            del conversations[conversation_id]
+            print(f"[WebSocket] Task complete after {step} steps")
+            break
+
+        # Execute next action
+        next_action = result.get('next_action')
+        if not next_action:
+            await send_ws(ws, 'task_complete', {
+                'conversation_id': conversation_id,
+                'total_steps': step,
+                'reason': 'no_action'
+            })
+            break
+
+        # Send action notification
+        await send_ws(ws, 'next_action', {
+            'function': next_action.get('function'),
+            'args': next_action.get('args', {}),
+            'step': step
+        })
+
+        # Execute the function
+        execution_result = await execute_robot_function(next_action)
+
+        # Send execution result
+        await send_ws(ws, 'execution_result', {
+            'success': execution_result.get('success', False),
+            'message': execution_result.get('message', ''),
+            'step': step,
+            'function': next_action.get('function'),
+            'details': execution_result
+        })
+
+        # Capture new images after execution
+        images = capture_camera_images()
+        await send_ws(ws, 'camera_frame', {
+            'gripper_cam': images[0] if len(images) > 0 else '',
+            'top_cam': images[1] if len(images) > 1 else ''
+        })
+
+        # Build feedback for next iteration
+        feedback_text = f"""EXECUTION RESULT (Step {step}):
+Function: {next_action.get('function')}
+Arguments: {json.dumps(next_action.get('args', {}), indent=2)}
+Success: {execution_result.get('success', False)}
+"""
+        if execution_result.get('message'):
+            feedback_text += f"Message: {execution_result['message']}\n"
+        if not execution_result.get('success') and execution_result.get('error'):
+            feedback_text += f"ERROR: {execution_result['error']}\n"
+
+        feedback_text += "\nNEW CAMERA IMAGES (above) show current state. Verify and decide next action."
+
+        # Add feedback to history
+        feedback_parts = [types.Part(text=feedback_text)]
+        for img_b64 in images:
+            if img_b64 and img_b64.strip():
+                image_bytes = base64.b64decode(img_b64)
+                feedback_parts.append(types.Part.from_bytes(data=image_bytes, mime_type='image/jpeg'))
+
+        conv['history'].append(types.Content(role='user', parts=feedback_parts))
+
+    else:
+        # Max steps reached
+        await send_ws(ws, 'error', {
+            'code': 'MAX_STEPS',
+            'message': f'Task exceeded maximum {max_steps} steps'
+        })
+
+
+async def handle_ws_robot_connect(ws: web.WebSocketResponse):
+    """Handle robot connect via WebSocket."""
+    global robot_connected
+
+    if not arm_controllers:
+        await send_ws(ws, 'error', {'code': 'NO_ROBOT', 'message': 'Robot not initialized'})
+        return
+
+    if robot_connected:
+        await send_ws(ws, 'robot_status', {'connected': True, 'message': 'Already connected'})
+        return
+
+    try:
+        print("\n[WebSocket] 🎬 OPENING CEREMONY")
+
+        # Get first arm for ceremony (or all arms)
+        first_arm_id = list(arm_controllers.keys())[0]
+        arm_stack = arm_controllers[first_arm_id]
+        arm_ctrl = arm_stack['arm']
+        gripper_ctrl = arm_stack['gripper']
+
+        # Perform opening ceremony
+        ceremony_result = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: arm_ctrl.opening_ceremony(moving_time=4.0, blocking=True)
+        )
+
+        if not ceremony_result.get('success'):
+            await send_ws(ws, 'error', {
+                'code': 'CEREMONY_FAILED',
+                'message': ceremony_result.get('error', 'Opening ceremony failed')
+            })
+            return
+
+        # Open gripper
+        await asyncio.get_event_loop().run_in_executor(None, gripper_ctrl.open_gripper)
+
+        robot_connected = True
+
+        # Broadcast to all clients
+        await broadcast_ws('robot_status', {
+            'connected': True,
+            'connected_arms': list(arm_controllers.keys()),
+            'message': 'Robot connected and ready'
+        })
+
+        print("[WebSocket] ✓ Opening ceremony complete")
+
+    except Exception as e:
+        await send_ws(ws, 'error', {'code': 'CONNECT_ERROR', 'message': str(e)})
+
+
+async def handle_ws_robot_disconnect(ws: web.WebSocketResponse):
+    """Handle robot disconnect via WebSocket."""
+    global robot_connected
+
+    if not arm_controllers:
+        await send_ws(ws, 'error', {'code': 'NO_ROBOT', 'message': 'Robot not initialized'})
+        return
+
+    if not robot_connected:
+        await send_ws(ws, 'robot_status', {'connected': False, 'message': 'Already disconnected'})
+        return
+
+    try:
+        print("\n[WebSocket] 🎬 CLOSING CEREMONY")
+
+        first_arm_id = list(arm_controllers.keys())[0]
+        arm_stack = arm_controllers[first_arm_id]
+        arm_ctrl = arm_stack['arm']
+        gripper_ctrl = arm_stack['gripper']
+
+        # Close gripper
+        await asyncio.get_event_loop().run_in_executor(None, gripper_ctrl.close_gripper)
+
+        # Perform closing ceremony
+        ceremony_result = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: arm_ctrl.closing_ceremony(moving_time=4.0, blocking=True)
+        )
+
+        robot_connected = False
+
+        # Broadcast to all clients
+        await broadcast_ws('robot_status', {
+            'connected': False,
+            'message': 'Robot disconnected - arm in sleep position'
+        })
+
+        print("[WebSocket] ✓ Closing ceremony complete")
+
+    except Exception as e:
+        await send_ws(ws, 'error', {'code': 'DISCONNECT_ERROR', 'message': str(e)})
+
+
+async def handle_ws_status_request(ws: web.WebSocketResponse):
+    """Handle status request via WebSocket."""
+    await send_ws(ws, 'robot_status', {
+        'connected': robot_connected,
+        'connected_arms': list(arm_controllers.keys()),
+        'cameras': ['gripper_cam', 'top_cam'] if camera_controller and camera_controller.initialized else []
+    })
+
+
+def build_context_prompt(prompt: str, current_state: dict) -> str:
+    """Build the context prompt for Gemini (extracted for reuse)."""
+    # Get robot model for specs
+    robot_model_instance = None
+    if arm_controllers:
+        first_arm = list(arm_controllers.values())[0]
+        robot_model_instance = first_arm.get('model')
+
+    joint_limits_deg = {
+        'waist': '[-180°, 180°]',
+        'shoulder': '[-108°, 114°]',
+        'elbow': '[-123°, 92°]',
+        'forearm_roll': '[-180°, 180°]',
+        'wrist_angle': '[-100°, 123°]',
+        'wrist_rotate': '[-180°, 180°]'
+    }
+
+    link_lengths = {
+        'base_height': 0.08915,
+        'shoulder_offset': 0.050,
+        'upper_arm': 0.200,
+        'elbow_offset': 0.050,
+        'forearm': 0.200,
+        'wrist_to_gripper': 0.065,
+        'gripper_fingers': 0.025
+    }
+
+    workspace_bounds = robot_model_instance.workspace_limits if robot_model_instance else {
+        'x': (0.15, 0.50),
+        'y': (-0.30, 0.30),
+        'z': (0.05, 0.40)
+    }
+
+    robot_base = [0, 0, 0]
+
+    current_joints = current_state.get('joints', [])
+    current_joints_deg = [f"{j * 57.2958:.1f}°" for j in current_joints] if current_joints else []
+
+    ee_pos = current_state.get('end_effector_position', {})
+    ee_pos_str = f"[{ee_pos.get('x', 0):.3f}, {ee_pos.get('y', 0):.3f}, {ee_pos.get('z', 0):.3f}]" if ee_pos else "unknown"
+
+    gripper_pos = current_state.get('gripper_position', 0)
+    gripper_state_str = "open" if gripper_pos > 0.025 else "closed"
+
+    return f"""NEW TASK: {prompt}
+
+═══════════════════════════════════════════════════════════
+ROBOT SPECIFICATIONS - ViperX 300s
+═══════════════════════════════════════════════════════════
+
+MODEL INFO:
+- Manufacturer: Trossen Robotics
+- Type: 6-DOF robotic arm
+- Degrees of Freedom: 6
+- Maximum Reach: 0.75m from base
+- Payload Capacity: 0.75kg
+
+JOINT LIMITS (in degrees):
+- Waist (base rotation): {joint_limits_deg['waist']}
+- Shoulder: {joint_limits_deg['shoulder']}
+- Elbow: {joint_limits_deg['elbow']}
+- Forearm Roll: {joint_limits_deg['forearm_roll']}
+- Wrist Angle: {joint_limits_deg['wrist_angle']}
+- Wrist Rotate: {joint_limits_deg['wrist_rotate']}
+
+LINK LENGTHS (in meters):
+- Base height: {link_lengths['base_height']:.5f}m
+- Shoulder offset: {link_lengths['shoulder_offset']:.3f}m
+- Upper arm: {link_lengths['upper_arm']:.3f}m
+- Elbow offset: {link_lengths['elbow_offset']:.3f}m
+- Forearm: {link_lengths['forearm']:.3f}m
+- Wrist to gripper: {link_lengths['wrist_to_gripper']:.3f}m
+- Gripper fingers: {link_lengths['gripper_fingers']:.3f}m
+
+GRIPPER SPECIFICATIONS:
+- Type: parallel_jaw
+- Opening range: [0.000m, 0.074m]
+- Max force: 30.0N (approximate)
+
+COORDINATE SYSTEM:
+- Convention: Right-handed coordinate system
+- X-axis: Forward (X+ away from robot base, X- toward base)
+- Y-axis: Left/Right (Y+ to robot's left, Y- to robot's right)
+- Z-axis: Vertical (Z+ upward from table, Z=0 at table level)
+- Units: meters
+- Robot base position in world: {robot_base}
+
+═══════════════════════════════════════════════════════════
+CURRENT ROBOT STATE
+═══════════════════════════════════════════════════════════
+
+CURRENT JOINTS (degrees): {current_joints_deg}
+END-EFFECTOR POSITION: {ee_pos_str} meters (relative to robot base)
+GRIPPER STATE: {gripper_state_str} (position: {gripper_pos:.3f}m)
+
+WORKSPACE BOUNDS (relative to robot base, in meters):
+- X: {workspace_bounds.get('x', [0.1, 0.6])} (X+ forward, X- backward)
+- Y: {workspace_bounds.get('y', [-0.3, 0.3])} (Y+ left, Y- right)
+- Z: {workspace_bounds.get('z', [0.05, 0.55])} (Z+ up from table)
+
+═══════════════════════════════════════════════════════════
+CAMERA SETUP
+═══════════════════════════════════════════════════════════
+
+You will receive 2 camera images with each request IN THIS EXACT ORDER:
+
+IMAGE 1 (FIRST IMAGE) - GRIPPER CAMERA:
+- Location: Mounted on robot end-effector (gripper base)
+- Field of View: 70° FOV
+- Orientation: Looking down from gripper at ~155° angle
+- Purpose: VERIFY GRASPS - Check if objects are IN the gripper
+
+IMAGE 2 (SECOND IMAGE) - OVERHEAD CAMERA:
+- Location: Bird's-eye view above workspace at [0, -0.3, 1.0]
+- Field of View: 60° FOV
+- Orientation: Looking down at entire workspace
+- Purpose: SPATIAL REASONING - Localize objects, plan trajectories
+
+{build_tool_definitions(list(arm_controllers.keys()))}
+
+CRITICAL - ITERATIVE EXECUTION WITH VISUAL VERIFICATION:
+You execute tasks ONE STEP AT A TIME with visual feedback:
+
+1. Analyze current camera images
+2. Return ONE function call for the NEXT step only
+3. I will execute it and send you NEW camera images + execution result
+4. You verify the result visually in the NEW images
+5. If successful, continue to next step
+6. If failed, adjust and retry
+7. Repeat until task complete
+
+RESPONSE FORMAT:
+Return JSON with ONE function call:
+{{
+    "reasoning": "What I see in current images and why this step is needed",
+    "next_action": {{
+        "function": "move_arm",
+        "args": {{"arm": "follower_right", "position": [0.3, 0.1, 0.24]}}
+    }},
+    "verification_check": "After execution, I expect gripper 10cm above red cube",
+    "task_complete": false
+}}
+
+When task is fully complete:
+{{
+    "reasoning": "Verification complete - object is grasped and lifted as shown in images",
+    "next_action": null,
+    "verification_check": null,
+    "task_complete": true
+}}
+"""
 
 
 try:
@@ -1587,9 +2156,14 @@ def make_app() -> web.Application:
     app.router.add_get('/camera/info', handle_camera_info)
     app.router.add_get('/camera/{camera_name}/frame', handle_camera_frame)
 
-    # Add CORS to routes
+    # WebSocket endpoint (for unified real-time communication)
+    app.router.add_get('/ws', websocket_handler)
+
+    # Add CORS to HTTP routes only (WebSocket doesn't need CORS)
     for route in list(app.router.routes()):
-        cors.add(route)
+        # Skip WebSocket route
+        if route.resource and '/ws' not in str(route.resource):
+            cors.add(route)
 
     # Register cleanup handler
     app.on_cleanup.append(on_cleanup)
@@ -1625,24 +2199,34 @@ if __name__ == '__main__':
 
     # Initialize robot hardware
     if not args.no_robot:
+        if not ROBOT_HARDWARE_AVAILABLE:
+            print("\nERROR: Robot hardware modules not available!")
+            print("Missing dependencies (dynamixel_sdk, etc.)")
+            print("Run with --no-robot flag to start without hardware.")
+            sys.exit(1)
         if not initialize_robot_sync():
             print("\nERROR: Failed to initialize robot hardware!")
             print("Run with --no-robot flag to start without hardware.")
             sys.exit(1)
     else:
-        print("WARNING: Running without robot hardware (--no-robot flag)")
+        print("INFO: Running without robot hardware (--no-robot flag)")
+        print("      WebSocket and API endpoints will work, but robot")
+        print("      commands will return mock responses.")
         print()
 
     print(f"Starting server on http://localhost:{args.port}")
-    print("Endpoints:")
+    print()
+    print("HTTP Endpoints:")
     print("  - POST /initialize        (multi-arm detection and initialization)")
     print("  - POST /robotics-er-request")
-    print("      Initial: {prompt}")
-    print("      Feedback: {conversation_id, execution_result}")
-    print("  - GET /status")
+    print("  - GET  /status")
     print("  - POST /robot/connect     (opening ceremony)")
     print("  - POST /robot/disconnect  (closing ceremony)")
     print("  - GET  /robot/status")
+    print()
+    print("WebSocket Endpoint:")
+    print(f"  - ws://localhost:{args.port}/ws")
+    print("    Messages: task_request, robot_connect, robot_disconnect, status_request")
     print()
 
     try:

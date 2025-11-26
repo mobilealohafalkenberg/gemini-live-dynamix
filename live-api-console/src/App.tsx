@@ -1,24 +1,33 @@
 /**
  * ALOHA Robot Control App
- * Uses Gemini ER Robotics API via ER Bridge for robot control
+ * Uses WebSocket connection to ER Bridge for real-time robot control
  */
 
 import { useState, useCallback } from "react";
 import "./App.scss";
 import { ALOHAControl } from "./components/aloha-control/ALOHAControl";
-import ControlTray, { ConnectionInfo } from "./components/control-tray/ControlTray";
 import { DualCameraView } from "./components/camera-feed/CameraFeed";
+import { CameraFrames, RobotStatus } from "./hooks/useBridgeWebSocket";
 
 function App() {
-  // Connection state lifted to App level
-  const [robotConnected, setRobotConnected] = useState(false);
-  const [connectionInfo, setConnectionInfo] = useState<ConnectionInfo | undefined>(undefined);
+  // Camera frames from WebSocket (shared between ALOHAControl and DualCameraView)
+  const [cameraFrames, setCameraFrames] = useState<CameraFrames | null>(null);
+  const [robotStatus, setRobotStatus] = useState<RobotStatus | null>(null);
+  const [wsConnected, setWsConnected] = useState(false);
 
-  // Handle connection changes from ControlTray
-  const handleConnectionChange = useCallback((connected: boolean, info?: ConnectionInfo) => {
-    setRobotConnected(connected);
-    setConnectionInfo(info);
+  // Handle camera frames from ALOHAControl WebSocket
+  const handleCameraFrames = useCallback((frames: CameraFrames) => {
+    setCameraFrames(frames);
+    setWsConnected(true);
   }, []);
+
+  // Handle robot status changes from WebSocket
+  const handleRobotStatusChange = useCallback((status: RobotStatus) => {
+    setRobotStatus(status);
+    setWsConnected(true);
+  }, []);
+
+  const robotConnected = robotStatus?.connected ?? false;
 
   return (
     <div className="App">
@@ -29,18 +38,30 @@ function App() {
           </h1>
 
           <div className="main-app-area">
-            {/* Main robot control component */}
+            {/* Main robot control component with WebSocket */}
             <ALOHAControl
-              robotConnected={robotConnected}
-              connectionInfo={connectionInfo}
+              onCameraFrames={handleCameraFrames}
+              onRobotStatusChange={handleRobotStatusChange}
             />
 
-            {/* Robot camera feeds */}
-            <DualCameraView enabled={robotConnected} />
+            {/* Robot camera feeds (receives frames from WebSocket via ALOHAControl) */}
+            <DualCameraView
+              frames={cameraFrames}
+              isConnected={wsConnected && robotConnected}
+            />
           </div>
 
-          {/* Control tray with connection controls */}
-          <ControlTray onConnectionChange={handleConnectionChange} />
+          {/* Status footer */}
+          <div style={{
+            textAlign: 'center',
+            padding: '8px',
+            color: '#6b7280',
+            fontSize: 12
+          }}>
+            WebSocket: {wsConnected ? 'Connected' : 'Connecting...'} |
+            Robot: {robotConnected ? 'Ready' : 'Not connected'} |
+            Arms: {robotStatus?.connected_arms?.join(', ') || 'None'}
+          </div>
         </main>
       </div>
     </div>

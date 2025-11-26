@@ -1,74 +1,32 @@
-import { useEffect, useState, useRef } from 'react';
-
-const ER_BRIDGE_ENDPOINT = process.env.REACT_APP_ER_BRIDGE_ENDPOINT || 'http://localhost:8082';
-
-// ER Bridge Response Types
-interface ERAction {
-  function: string;
-  args: Record<string, any>;
-}
-
-interface ERExecutionResult {
-  success: boolean;
-  function: string;
-  args: Record<string, any>;
-  message?: string;
-  error?: string;
-  new_position?: number[];
-  gripper_state?: string;
-}
-
-interface ERResponse {
-  success: boolean;
-  conversation_id: string;
-  step: number;
-  reasoning: string;
-  next_action: ERAction | null;
-  execution_result: ERExecutionResult | null;
-  images: string[];
-  verification_check: string;
-  task_complete: boolean;
-  error?: string;
-}
-
-interface ERStep {
-  step: number;
-  reasoning: string;
-  action: ERAction | null;
-  result: ERExecutionResult | null;
-  verification: string;
-  images: string[];
-  timestamp: string;
-}
+import { useEffect, useState, useRef, useCallback } from 'react';
+import {
+  useBridgeWebSocket,
+  CameraFrames,
+  ReasoningMessage,
+  NextActionMessage,
+  ExecutionResultMessage,
+  TaskCompleteMessage,
+  ErrorMessage,
+  RobotStatus,
+} from '../../hooks/useBridgeWebSocket';
 
 // Chat message type for the UI
 interface ChatMessage {
   id: string;
   timestamp: string;
-  type: 'user' | 'assistant' | 'system' | 'action' | 'result' | 'connection';
+  type: 'user' | 'assistant' | 'system' | 'action' | 'result' | 'connection' | 'error';
   content: string;
   metadata?: {
     step?: number;
-    action?: ERAction;
-    result?: ERExecutionResult;
     isError?: boolean;
     images?: string[];
-    connectionInfo?: ConnectionInfo;
   };
-}
-
-// Connection info from ER Bridge
-interface ConnectionInfo {
-  connected_arms: string[];
-  arm_count: number;
-  cameras: string[];
-  gemini_api_ready: boolean;
 }
 
 // Props for ALOHAControl
 interface ALOHAControlProps {
-  robotConnected: boolean;
-  connectionInfo?: ConnectionInfo;
+  onCameraFrames?: (frames: CameraFrames) => void;
+  onRobotStatusChange?: (status: RobotStatus) => void;
 }
 
 // Chat bubble colors
@@ -78,129 +36,124 @@ const CHAT_COLORS = {
   system: { background: 'transparent', text: '#9ca3af' },
   action: { background: '#1e3a5f', text: '#60a5fa' },
   connection: { background: '#1e3a5f', text: '#60a5fa' },
+  error: { background: '#7f1d1d', text: '#f87171' },
   result: {
     success: { background: '#064e3b', text: '#34d399' },
     error: { background: '#7f1d1d', text: '#f87171' },
   },
 };
 
-export function ALOHAControl({ robotConnected, connectionInfo }: ALOHAControlProps) {
+export function ALOHAControl({ onCameraFrames, onRobotStatusChange }: ALOHAControlProps) {
   const [taskStatus, setTaskStatus] = useState('Ready');
   const chatEndRef = useRef<HTMLDivElement>(null);
 
   // Chat messages state
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
 
-  // ER Bridge State
-  const [erTaskInput, setErTaskInput] = useState('');
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const [erConversationId, setErConversationId] = useState<string | null>(null);
-  const [erSteps, setErSteps] = useState<ERStep[]>([]);
-  const [erIsExecuting, setErIsExecuting] = useState(false);
-  const [erTaskComplete, setErTaskComplete] = useState(false);
-  const [erCurrentTask, setErCurrentTask] = useState<string>('');
-  const [erCameraImages, setErCameraImages] = useState<string[]>([]);
+  // Task state
+  const [taskInput, setTaskInput] = useState('');
+  const [isExecuting, setIsExecuting] = useState(false);
+  const [currentStep, setCurrentStep] = useState(0);
+  const [cameraImages, setCameraImages] = useState<CameraFrames | null>(null);
 
-  // Track if we've shown the connection message
-  const [connectionMessageShown, setConnectionMessageShown] = useState(false);
+  // Add a message to chat
+  const addChatMessage = useCallback((message: Omit<ChatMessage, 'id' | 'timestamp'>) => {
+    const newMessage: ChatMessage = {
+      ...message,
+      id: `msg-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+      timestamp: new Date().toLocaleTimeString(),
+    };
+    setChatMessages(prev => [...prev, newMessage]);
+  }, []);
 
-  // Show connection info in chat when robot connects
-  useEffect(() => {
-    if (robotConnected && connectionInfo && !connectionMessageShown) {
-      const connectionMessage: ChatMessage = {
-        id: 'connection-info',
-        timestamp: new Date().toLocaleTimeString(),
-        type: 'connection',
-        content: formatConnectionInfo(connectionInfo),
-        metadata: { connectionInfo }
-      };
-      setChatMessages(prev => [connectionMessage, ...prev.filter(m => m.id !== 'connection-info')]);
-      setConnectionMessageShown(true);
-    } else if (!robotConnected && connectionMessageShown) {
-      // Reset when disconnected
-      setConnectionMessageShown(false);
-    }
-  }, [robotConnected, connectionInfo, connectionMessageShown]);
-
-  // Format connection info for display
-  const formatConnectionInfo = (info: ConnectionInfo): string => {
-    const lines = [
-      'Connected to ER Bridge',
-      `Arms: ${info.connected_arms.length > 0 ? info.connected_arms.join(', ') : 'None detected'}`,
-      `Cameras: ${info.cameras.length > 0 ? info.cameras.join(', ') : 'None'}`,
-      `Gemini ER API: ${info.gemini_api_ready ? 'Ready' : 'Not configured'}`
-    ];
-    return lines.join('\n');
-  };
-
-  // Convert ER steps to chat messages
-  useEffect(() => {
-    const messages: ChatMessage[] = [];
-
-    // Keep connection message at the top if it exists
-    const existingConnectionMsg = chatMessages.find(m => m.id === 'connection-info');
-    if (existingConnectionMsg) {
-      messages.push(existingConnectionMsg);
-    }
-
-    // Add user task as message
-    if (erCurrentTask) {
-      messages.push({
-        id: 'task-input',
-        timestamp: new Date().toLocaleTimeString(),
-        type: 'user',
-        content: erCurrentTask,
-      });
-    }
-
-    // Convert each step to chat messages
-    erSteps.forEach((step) => {
-      // Add reasoning
-      if (step.reasoning) {
-        messages.push({
-          id: `step-${step.step}-reasoning`,
-          timestamp: step.timestamp,
-          type: 'assistant',
-          content: step.reasoning,
-          metadata: { step: step.step, images: step.images }
-        });
-      }
-
-      // Add action
-      if (step.action) {
-        messages.push({
-          id: `step-${step.step}-action`,
-          timestamp: step.timestamp,
-          type: 'action',
-          content: `${step.action.function}(${JSON.stringify(step.action.args)})`,
-          metadata: { action: step.action }
-        });
-      }
-
-      // Add result
-      if (step.result) {
-        messages.push({
-          id: `step-${step.step}-result`,
-          timestamp: step.timestamp,
-          type: 'result',
-          content: step.result.message || step.result.error || 'Completed',
-          metadata: { result: step.result, isError: !step.result.success }
-        });
-      }
+  // WebSocket message handlers
+  const handleReasoning = useCallback((msg: ReasoningMessage) => {
+    setCurrentStep(msg.step);
+    setTaskStatus(`Step ${msg.step}`);
+    addChatMessage({
+      type: 'assistant',
+      content: msg.text,
+      metadata: { step: msg.step },
     });
+  }, [addChatMessage]);
 
-    // Add completion message
-    if (erTaskComplete) {
-      messages.push({
-        id: 'task-complete',
-        timestamp: new Date().toLocaleTimeString(),
-        type: 'system',
-        content: 'Task completed',
+  const handleNextAction = useCallback((msg: NextActionMessage) => {
+    addChatMessage({
+      type: 'action',
+      content: `${msg.function}(${JSON.stringify(msg.args)})`,
+      metadata: { step: msg.step },
+    });
+  }, [addChatMessage]);
+
+  const handleExecutionResult = useCallback((msg: ExecutionResultMessage) => {
+    addChatMessage({
+      type: 'result',
+      content: msg.message || (msg.success ? 'Success' : 'Failed'),
+      metadata: { step: msg.step, isError: !msg.success },
+    });
+  }, [addChatMessage]);
+
+  const handleTaskComplete = useCallback((msg: TaskCompleteMessage) => {
+    setIsExecuting(false);
+    setTaskStatus('Complete');
+    addChatMessage({
+      type: 'system',
+      content: `Task completed in ${msg.total_steps} step${msg.total_steps !== 1 ? 's' : ''}`,
+    });
+  }, [addChatMessage]);
+
+  const handleError = useCallback((msg: ErrorMessage) => {
+    setIsExecuting(false);
+    setTaskStatus('Error');
+    addChatMessage({
+      type: 'error',
+      content: `${msg.code}: ${msg.message}`,
+      metadata: { isError: true },
+    });
+  }, [addChatMessage]);
+
+  const handleCameraFrame = useCallback((frames: CameraFrames) => {
+    setCameraImages(frames);
+    onCameraFrames?.(frames);
+  }, [onCameraFrames]);
+
+  const handleRobotStatus = useCallback((status: RobotStatus) => {
+    onRobotStatusChange?.(status);
+    // Don't add chat message for every status update, just log
+    console.log('[ALOHAControl] Robot status:', status);
+  }, [onRobotStatusChange]);
+
+  // Initialize WebSocket
+  const {
+    isConnected,
+    connectionState,
+    robotStatus,
+    sendTaskRequest,
+    sendRobotConnect,
+    sendRobotDisconnect,
+  } = useBridgeWebSocket({
+    onReasoning: handleReasoning,
+    onNextAction: handleNextAction,
+    onExecutionResult: handleExecutionResult,
+    onTaskComplete: handleTaskComplete,
+    onError: handleError,
+    onCameraFrame: handleCameraFrame,
+    onRobotStatus: handleRobotStatus,
+  });
+
+  // Derive robot connected state
+  const robotConnected = robotStatus?.connected ?? false;
+
+  // Show connection status in chat when it changes
+  useEffect(() => {
+    if (connectionState === 'connected') {
+      addChatMessage({
+        type: 'connection',
+        content: `WebSocket connected\nRobot: ${robotConnected ? 'Ready' : 'Not connected'}`,
       });
     }
-
-    setChatMessages(messages);
-  }, [erSteps, erCurrentTask, erTaskComplete, chatMessages]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connectionState]);
 
   // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
@@ -209,177 +162,42 @@ export function ALOHAControl({ robotConnected, connectionInfo }: ALOHAControlPro
     }
   }, [chatMessages]);
 
-  // ER Bridge API Functions
-  const sendERTask = async (prompt: string) => {
-    if (!robotConnected) {
-      // Add error message to chat
-      const errorMsg: ChatMessage = {
-        id: `error-${Date.now()}`,
-        timestamp: new Date().toLocaleTimeString(),
-        type: 'system',
-        content: 'Please connect to the robot first',
-        metadata: { isError: true }
-      };
-      setChatMessages(prev => [...prev, errorMsg]);
-      return;
-    }
+  // Handle task submission
+  const handleTaskSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!taskInput.trim() || isExecuting || !robotConnected) return;
 
-    setErIsExecuting(true);
-    setErTaskComplete(false);
-    setErSteps([]);
-    setErCurrentTask(prompt);
-    setErCameraImages([]);
+    const task = taskInput.trim();
+    setTaskInput('');
+    setIsExecuting(true);
+    setCurrentStep(0);
     setTaskStatus('Sending task...');
 
-    try {
-      const res = await fetch(`${ER_BRIDGE_ENDPOINT}/robotics-er-request`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt }),
-      });
+    // Add user message
+    addChatMessage({
+      type: 'user',
+      content: task,
+    });
 
-      const data: ERResponse = await res.json();
+    // Send via WebSocket
+    sendTaskRequest(task);
+  };
 
-      if (!data.success) {
-        console.error('ER Bridge error:', data.error);
-        const errorMsg: ChatMessage = {
-          id: `error-${Date.now()}`,
-          timestamp: new Date().toLocaleTimeString(),
-          type: 'result',
-          content: data.error || 'Unknown error',
-          metadata: { isError: true }
-        };
-        setChatMessages(prev => [...prev, errorMsg]);
-        setErIsExecuting(false);
-        setTaskStatus('Error');
-        return;
-      }
-
-      setErConversationId(data.conversation_id);
-      setTaskStatus(`Step ${data.step}`);
-
-      // Add step to history
-      const newStep: ERStep = {
-        step: data.step,
-        reasoning: data.reasoning,
-        action: data.next_action,
-        result: data.execution_result,
-        verification: data.verification_check,
-        images: data.images,
-        timestamp: new Date().toLocaleTimeString(),
-      };
-      setErSteps([newStep]);
-
-      // Update camera images
-      if (data.images && data.images.length > 0) {
-        setErCameraImages(data.images);
-      }
-
-      // Check if task is complete
-      if (data.task_complete) {
-        setErTaskComplete(true);
-        setErIsExecuting(false);
-        setErConversationId(null);
-        setTaskStatus('Complete');
-      } else if (data.execution_result) {
-        // Auto-continue with feedback
-        await sendERFeedback(data.conversation_id, data.execution_result);
-      } else {
-        setErIsExecuting(false);
-        setTaskStatus('Ready');
-      }
-    } catch (e: any) {
-      console.error('ER Bridge fetch error:', e?.message || e);
-      const errorMsg: ChatMessage = {
-        id: `error-${Date.now()}`,
-        timestamp: new Date().toLocaleTimeString(),
-        type: 'result',
-        content: `Connection error: ${e?.message || 'Failed to reach ER Bridge'}`,
-        metadata: { isError: true }
-      };
-      setChatMessages(prev => [...prev, errorMsg]);
-      setErIsExecuting(false);
-      setTaskStatus('Error');
+  // Handle robot connect/disconnect
+  const handleRobotToggle = () => {
+    if (robotConnected) {
+      sendRobotDisconnect();
+    } else {
+      sendRobotConnect();
     }
   };
 
-  const sendERFeedback = async (conversationId: string, executionResult: ERExecutionResult) => {
-    try {
-      setTaskStatus('Processing feedback...');
-      const res = await fetch(`${ER_BRIDGE_ENDPOINT}/robotics-er-request`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          conversation_id: conversationId,
-          execution_result: executionResult,
-        }),
-      });
-
-      const data: ERResponse = await res.json();
-
-      if (!data.success) {
-        console.error('ER Bridge feedback error:', data.error);
-        setErIsExecuting(false);
-        setTaskStatus('Error');
-        return;
-      }
-
-      setTaskStatus(`Step ${data.step}`);
-
-      // Add step to history
-      const newStep: ERStep = {
-        step: data.step,
-        reasoning: data.reasoning,
-        action: data.next_action,
-        result: data.execution_result,
-        verification: data.verification_check,
-        images: data.images,
-        timestamp: new Date().toLocaleTimeString(),
-      };
-      setErSteps(prev => [...prev, newStep]);
-
-      // Update camera images
-      if (data.images && data.images.length > 0) {
-        setErCameraImages(data.images);
-      }
-
-      // Check if task is complete
-      if (data.task_complete) {
-        setErTaskComplete(true);
-        setErIsExecuting(false);
-        setErConversationId(null);
-        setTaskStatus('Complete');
-      } else if (data.execution_result) {
-        // Auto-continue with feedback (recursive)
-        await sendERFeedback(data.conversation_id, data.execution_result);
-      } else {
-        setErIsExecuting(false);
-        setTaskStatus('Ready');
-      }
-    } catch (e: any) {
-      console.error('ER Bridge feedback fetch error:', e?.message || e);
-      setErIsExecuting(false);
-      setTaskStatus('Error');
-    }
-  };
-
-  const handleERTaskSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!erTaskInput.trim() || erIsExecuting) return;
-
-    const task = erTaskInput.trim();
-    setErTaskInput('');
-    await sendERTask(task);
-  };
-
+  // Clear chat
   const clearChat = () => {
-    setErSteps([]);
-    setErConversationId(null);
-    setErTaskComplete(false);
-    setErCurrentTask('');
-    setErCameraImages([]);
-    // Keep connection message, clear everything else
-    setChatMessages(prev => prev.filter(m => m.id === 'connection-info'));
+    setChatMessages([]);
+    setCameraImages(null);
+    setCurrentStep(0);
+    setTaskStatus('Ready');
   };
 
   // Chat bubble component
@@ -389,17 +207,26 @@ export function ALOHAControl({ robotConnected, connectionInfo }: ALOHAControlPro
     const isAction = message.type === 'action';
     const isResult = message.type === 'result';
     const isConnection = message.type === 'connection';
-    const isError = message.metadata?.isError;
+    const isError = message.type === 'error' || message.metadata?.isError;
 
-    let background = CHAT_COLORS[message.type as keyof typeof CHAT_COLORS];
+    let background: string;
     let textColor = '#e5e7eb';
 
     if (isResult) {
-      background = isError ? CHAT_COLORS.result.error : CHAT_COLORS.result.success;
-      textColor = (background as any).text;
-    } else if (typeof background === 'object' && 'background' in background) {
-      textColor = background.text;
-      background = background.background as any;
+      const colors = isError ? CHAT_COLORS.result.error : CHAT_COLORS.result.success;
+      background = colors.background;
+      textColor = colors.text;
+    } else if (isError) {
+      background = CHAT_COLORS.error.background;
+      textColor = CHAT_COLORS.error.text;
+    } else {
+      const style = CHAT_COLORS[message.type as keyof typeof CHAT_COLORS];
+      if (typeof style === 'object' && 'background' in style) {
+        background = style.background;
+        textColor = style.text;
+      } else {
+        background = '#374151';
+      }
     }
 
     return (
@@ -412,7 +239,7 @@ export function ALOHAControl({ robotConnected, connectionInfo }: ALOHAControlPro
           maxWidth: isSystem ? '100%' : isConnection ? '100%' : '85%',
           padding: isAction ? '8px 12px' : '10px 14px',
           borderRadius: 12,
-          background: typeof background === 'string' ? background : '#374151',
+          background,
           color: textColor,
           fontSize: isAction ? 12 : 14,
           lineHeight: 1.5,
@@ -423,8 +250,11 @@ export function ALOHAControl({ robotConnected, connectionInfo }: ALOHAControlPro
           {isAction && (
             <span style={{ opacity: 0.6, marginRight: 8 }}>Action:</span>
           )}
-          {isResult && (
-            <span style={{ marginRight: 8 }}>{isError ? 'Failed:' : 'Success:'}</span>
+          {isResult && !isError && (
+            <span style={{ marginRight: 8 }}>Success:</span>
+          )}
+          {isResult && isError && (
+            <span style={{ marginRight: 8 }}>Failed:</span>
           )}
           {isConnection && (
             <span style={{ opacity: 0.8, marginRight: 8, fontWeight: 'bold' }}>System:</span>
@@ -432,9 +262,16 @@ export function ALOHAControl({ robotConnected, connectionInfo }: ALOHAControlPro
           <span style={{ fontStyle: isSystem ? 'italic' : 'normal' }}>
             {message.content}
           </span>
-          <div style={{ fontSize: 10, opacity: 0.5, marginTop: 4 }}>
-            {message.timestamp}
-          </div>
+          {message.metadata?.step && (
+            <div style={{ fontSize: 10, opacity: 0.5, marginTop: 4 }}>
+              Step {message.metadata.step} • {message.timestamp}
+            </div>
+          )}
+          {!message.metadata?.step && (
+            <div style={{ fontSize: 10, opacity: 0.5, marginTop: 4 }}>
+              {message.timestamp}
+            </div>
+          )}
         </div>
       </div>
     );
@@ -442,7 +279,7 @@ export function ALOHAControl({ robotConnected, connectionInfo }: ALOHAControlPro
 
   return (
     <div style={{ padding: 12, margin: 10, background: '#1f2937', color: 'white', borderRadius: 8 }}>
-      {/* Minimal Header */}
+      {/* Header */}
       <div style={{
         display: 'flex',
         justifyContent: 'space-between',
@@ -452,12 +289,36 @@ export function ALOHAControl({ robotConnected, connectionInfo }: ALOHAControlPro
         borderBottom: '1px solid #374151'
       }}>
         <h3 style={{ margin: 0 }}>Robot Control</h3>
-        <div style={{ fontSize: 12, display: 'flex', gap: 12 }}>
+        <div style={{ fontSize: 12, display: 'flex', gap: 12, alignItems: 'center' }}>
+          <span style={{ color: isConnected ? '#10b981' : '#ef4444' }}>
+            WS: {connectionState}
+          </span>
           <span style={{ color: robotConnected ? '#10b981' : '#ef4444' }}>
-            {robotConnected ? 'Connected' : 'Disconnected'}
+            Robot: {robotConnected ? 'Ready' : 'Disconnected'}
           </span>
           <span style={{ opacity: 0.6 }}>{taskStatus}</span>
         </div>
+      </div>
+
+      {/* Robot Connect/Disconnect Button */}
+      <div style={{ marginBottom: 12 }}>
+        <button
+          onClick={handleRobotToggle}
+          disabled={!isConnected || isExecuting}
+          style={{
+            padding: '8px 16px',
+            borderRadius: 6,
+            border: 'none',
+            background: robotConnected ? '#ef4444' : '#10b981',
+            color: 'white',
+            cursor: !isConnected || isExecuting ? 'not-allowed' : 'pointer',
+            opacity: !isConnected || isExecuting ? 0.5 : 1,
+            fontSize: 12,
+            fontWeight: 'bold',
+          }}
+        >
+          {robotConnected ? 'Disconnect Robot' : 'Connect Robot'}
+        </button>
       </div>
 
       {/* Chat Display */}
@@ -465,7 +326,7 @@ export function ALOHAControl({ robotConnected, connectionInfo }: ALOHAControlPro
         background: '#111827',
         borderRadius: 6,
         marginBottom: 12,
-        height: 400,
+        height: 350,
         overflowY: 'auto',
         padding: 12,
       }}>
@@ -481,12 +342,18 @@ export function ALOHAControl({ robotConnected, connectionInfo }: ALOHAControlPro
             height: '100%'
           }}>
             <div style={{ fontSize: 24, marginBottom: 8 }}>
-              {robotConnected ? 'Enter a task below to start' : 'Connect to robot first'}
+              {!isConnected
+                ? 'Connecting to bridge...'
+                : robotConnected
+                  ? 'Enter a task below to start'
+                  : 'Connect to robot first'}
             </div>
             <div style={{ fontSize: 12 }}>
-              {robotConnected
+              {isConnected && robotConnected
                 ? 'Example: "Pick up the red cube and place it in the bowl"'
-                : 'Use the Connect Robot button below'}
+                : isConnected
+                  ? 'Use the Connect Robot button above'
+                  : 'WebSocket connecting...'}
             </div>
           </div>
         ) : (
@@ -498,7 +365,7 @@ export function ALOHAControl({ robotConnected, connectionInfo }: ALOHAControlPro
       </div>
 
       {/* Camera Preview (if images available) */}
-      {erCameraImages.length > 0 && (
+      {cameraImages && (cameraImages.gripper_cam || cameraImages.top_cam) && (
         <div style={{
           display: 'flex',
           gap: 8,
@@ -507,35 +374,49 @@ export function ALOHAControl({ robotConnected, connectionInfo }: ALOHAControlPro
           padding: 8,
           borderRadius: 6
         }}>
-          {erCameraImages.map((img, idx) => (
-            img && (
-              <div key={idx} style={{ flex: 1 }}>
-                <div style={{ fontSize: 10, opacity: 0.6, marginBottom: 4 }}>
-                  {idx === 0 ? 'Gripper Cam' : 'Top Cam'}
-                </div>
-                <img
-                  src={`data:image/jpeg;base64,${img}`}
-                  alt={idx === 0 ? 'Gripper camera' : 'Top camera'}
-                  style={{
-                    width: '100%',
-                    borderRadius: 4,
-                    border: '1px solid #374151',
-                  }}
-                />
+          {cameraImages.gripper_cam && (
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 10, opacity: 0.6, marginBottom: 4 }}>
+                Gripper Cam
               </div>
-            )
-          ))}
+              <img
+                src={`data:image/jpeg;base64,${cameraImages.gripper_cam}`}
+                alt="Gripper camera"
+                style={{
+                  width: '100%',
+                  borderRadius: 4,
+                  border: '1px solid #374151',
+                }}
+              />
+            </div>
+          )}
+          {cameraImages.top_cam && (
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 10, opacity: 0.6, marginBottom: 4 }}>
+                Top Cam
+              </div>
+              <img
+                src={`data:image/jpeg;base64,${cameraImages.top_cam}`}
+                alt="Top camera"
+                style={{
+                  width: '100%',
+                  borderRadius: 4,
+                  border: '1px solid #374151',
+                }}
+              />
+            </div>
+          )}
         </div>
       )}
 
       {/* Task Input Bar */}
-      <form onSubmit={handleERTaskSubmit} style={{ display: 'flex', gap: 8 }}>
+      <form onSubmit={handleTaskSubmit} style={{ display: 'flex', gap: 8 }}>
         <input
           type="text"
-          value={erTaskInput}
-          onChange={(e) => setErTaskInput(e.target.value)}
+          value={taskInput}
+          onChange={(e) => setTaskInput(e.target.value)}
           placeholder={robotConnected ? "Enter task (e.g., Pick up the red cube)" : "Connect to robot first..."}
-          disabled={erIsExecuting || !robotConnected}
+          disabled={isExecuting || !robotConnected}
           style={{
             flex: 1,
             padding: '12px 16px',
@@ -550,31 +431,32 @@ export function ALOHAControl({ robotConnected, connectionInfo }: ALOHAControlPro
         />
         <button
           type="submit"
-          disabled={erIsExecuting || !erTaskInput.trim() || !robotConnected}
+          disabled={isExecuting || !taskInput.trim() || !robotConnected}
           style={{
             padding: '12px 24px',
             borderRadius: 24,
             border: 'none',
-            background: erIsExecuting || !robotConnected ? '#4b5563' : '#3b82f6',
+            background: isExecuting || !robotConnected ? '#4b5563' : '#3b82f6',
             color: 'white',
-            cursor: erIsExecuting || !robotConnected ? 'not-allowed' : 'pointer',
+            cursor: isExecuting || !robotConnected ? 'not-allowed' : 'pointer',
             fontWeight: 'bold',
             fontSize: 14,
           }}
         >
-          {erIsExecuting ? '...' : 'Send'}
+          {isExecuting ? '...' : 'Send'}
         </button>
-        {chatMessages.filter(m => m.id !== 'connection-info').length > 0 && (
+        {chatMessages.length > 0 && (
           <button
             type="button"
             onClick={clearChat}
+            disabled={isExecuting}
             style={{
               padding: '12px 16px',
               borderRadius: 24,
               border: '1px solid #374151',
               background: 'transparent',
               color: '#9ca3af',
-              cursor: 'pointer',
+              cursor: isExecuting ? 'not-allowed' : 'pointer',
               fontSize: 14,
             }}
           >
@@ -583,9 +465,9 @@ export function ALOHAControl({ robotConnected, connectionInfo }: ALOHAControlPro
         )}
       </form>
 
-      {/* Bridge endpoint info */}
+      {/* Connection info */}
       <div style={{ fontSize: 10, opacity: 0.4, marginTop: 8, textAlign: 'center' }}>
-        ER Bridge: {ER_BRIDGE_ENDPOINT}
+        WebSocket: {connectionState} | Step: {currentStep}
       </div>
     </div>
   );
