@@ -1,8 +1,8 @@
 # ALOHA with Dynamixel SDK - System Documentation
 
 **System:** Mobile ALOHA with Gemini Robotics ER API
-**Stack:** Direct Dynamixel SDK + Python (No ROS2)
-**Date:** 2025-11-20
+**Stack:** Direct Dynamixel SDK + Python (No ROS2) + WebSocket
+**Date:** 2025-11-26
 
 This document describes the vision-guided Mobile ALOHA system using Google's Gemini Robotics ER API with direct Dynamixel SDK motor control (no ROS2).
 
@@ -29,7 +29,9 @@ This system enables vision-guided robot control using Google's Gemini Robotics E
 
 - **Vision-Guided Control:** Gemini ER analyzes camera images and plans manipulation tasks
 - **Iterative Execution:** Execute one action at a time with visual verification between steps
-- **Dual Camera System:** Gripper camera for grasp verification + overhead camera for spatial planning
+- **Real-Time Streaming:** WebSocket communication with live updates (reasoning, actions, results)
+- **Multi-Arm Support:** Dynamic detection and control of multiple robot arms
+- **Dynamic Camera Detection:** Auto-detect and use available RealSense cameras
 - **Direct Motor Control:** Sub-10ms latency via Dynamixel SDK (no ROS2)
 - **Safety Systems:** Workspace limits, joint constraints, collision avoidance
 - **Robot Ceremonies:** Smooth connect/disconnect workflows with sleep positions
@@ -60,25 +62,40 @@ This system enables vision-guided robot control using Google's Gemini Robotics E
 └───────────────────────────────┬─────────────────────────────────┘
                                 │ REST API (JSON)
 ┌───────────────────────────────▼─────────────────────────────────┐
-│    Python ER Bridge (er-setup/bridge_simple_er.py, Port 8082)   │
-│  • aiohttp HTTP server with CORS                                │
-│  • Endpoint: POST /robotics-er-request                          │
+│    Python ER Bridge (bridges/bridge_simple_er.py, Port 8082)    │
+│  • aiohttp WebSocket server with CORS                           │
+│  • Endpoint: ws://localhost:8082/ws                             │
+│  • Real-time streaming: reasoning → action → result → images    │
 │  • Captures camera images automatically                         │
 │  • Sends images + robot state to Gemini ER                      │
 │  • Executes ONE function at a time                              │
-│  • Returns execution result + NEW images for verification       │
+│  • Broadcasts robot status to all connected clients             │
 │  • Manages conversation state across steps                      │
 └─────────┬────────────────┬──────────────────────────┬───────────┘
           │                │                          │
+          │    WebSocket   │                          │
+          │    (ws://)     │                          │
+┌─────────▼────────────────▼──────────────────────────▼───────────┐
+│              React Frontend (TypeScript, Port 3000)             │
+│  • WebSocket client for bridge communication                    │
+│  • Real-time message handling (reasoning, actions, results)     │
+│  • Dynamic camera frame display                                 │
+│  • Robot connect/disconnect controls                            │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│                    Bridge Internal Components                    │
+├─────────┬────────────────┬──────────────────────────┬───────────┤
+│         │                │                          │           │
 ┌─────────▼────────┐ ┌────▼───────────┐ ┌───────────▼──────────┐
 │ ArmController    │ │ GripperControl │ │ CameraController     │
 │                  │ │                │ │                      │
 │ • Move joints    │ │ • Open/close   │ │ • RealSense D405    │
 │ • Move cartesian │ │ • State track  │ │ • RGBD capture      │
 │ • Trajectories   │ │ • 300mA limit  │ │ • Base64 JPEG       │
-│ • Safety checks  │ │ • Grasp verify │ │ • Dual cameras      │
-│ • IK via MR      │ │                │ │   - gripper_cam     │
-│ • Ceremonies     │ │                │ │   - top_cam         │
+│ • Safety checks  │ │ • Grasp verify │ │ • Dynamic cameras   │
+│ • IK via MR      │ │                │ │   (camera_0, etc.)  │
+│ • Ceremonies     │ │                │ │                      │
 └─────────┬────────┘ └────┬───────────┘ └──────────────────────┘
           │                │
 ┌─────────▼────────────────▼─────────────────────┐
@@ -100,7 +117,7 @@ This system enables vision-guided robot control using Google's Gemini Robotics E
           │ dynamixel_sdk Python package
 ┌─────────▼──────────────────────────────────────┐
 │   Dynamixel SDK (Python bindings)              │
-│ • Serial I/O via PortHandler                   │
+│ • Serial I/O via PortHandler                   │[]
 │ • Protocol 2.0 packet encoding                 │
 │ • GroupSyncRead/Write for efficiency          │
 └─────────┬──────────────────────────────────────┘
@@ -124,29 +141,46 @@ This system enables vision-guided robot control using Google's Gemini Robotics E
 
 ## How It Works
 
+### WebSocket Communication
+
+The frontend and bridge communicate via a persistent WebSocket connection at `ws://localhost:8082/ws`. All messages use a standardized envelope format:
+
+```json
+{
+  "type": "message_type",
+  "timestamp": 1732631400000,
+  "sequence": 1,
+  "payload": { /* message-specific data */ }
+}
+```
+
 ### Iterative Execution Workflow
 
-The system operates in a step-by-step loop with visual verification:
+The system operates in a step-by-step loop with visual verification and real-time streaming:
 
-**Step 1: User submits task**
-```
-"Pick up the red cube"
+**Step 1: User submits task via WebSocket**
+```json
+{ "type": "task_request", "payload": { "prompt": "Pick up the red cube" } }
 ```
 
 **Step 2: Bridge captures current state**
-- Takes photos from both cameras (gripper_cam + top_cam)
+- Takes photos from all available cameras (dynamically detected)
 - Reads current joint positions and end-effector position
-- Packages as context for Gemini ER
+- Streams `camera_frame` message to frontend with current images
+- Packages state as context for Gemini ER
 
 **Step 3: Gemini ER analyzes and plans**
-- Receives: Task description + 2 camera images + robot state
+- Receives: Task description + camera images + robot state
 - Analyzes: Object locations, robot position, workspace
 - Returns: ONE function call (e.g., `move_arm` to approach position)
 
-**Step 4: Bridge executes action**
+**Step 4: Bridge streams updates and executes**
+- Streams `reasoning` message with Gemini's analysis
+- Streams `next_action` message with function to execute
 - Calls the robot function (e.g., `arm_controller.move_to_position()`)
 - Waits for completion
-- Captures NEW camera images showing result
+- Streams `execution_result` with outcome
+- Captures NEW camera images, streams `camera_frame`
 
 **Step 5: Visual verification loop**
 - Sends execution result + NEW images back to Gemini ER
@@ -156,66 +190,79 @@ The system operates in a step-by-step loop with visual verification:
 
 **Step 6: Repeat until task complete**
 - Each action gets visual verification
-- Critical steps (like grasping) are verified in gripper camera
-- Task completes when Gemini ER returns `task_complete: true`
+- Critical steps (like grasping) are verified in camera images
+- Task completes when Gemini ER signals done → Bridge streams `task_complete`
 
 ### Example Task Execution
 
 ```
 User: "Pick up the red cube"
 
-Step 1: Gemini → move_arm([0.3, 0.1, 0.3])  # Approach cube
-        Bridge → Executes, captures images
-        Gemini → Verifies position in new images
+Step 1: Bridge → reasoning: "I see a red cube. Moving arm to approach position."
+        Bridge → next_action: move_arm(arm="follower_right", position=[0.3, 0.1, 0.3])
+        Bridge → execution_result: success
+        Bridge → camera_frame: [new images]
 
-Step 2: Gemini → move_arm([0.3, 0.1, 0.05])  # Descend to grasp height
-        Bridge → Executes, captures images
-        Gemini → Confirms alignment
+Step 2: Bridge → reasoning: "Aligned above cube. Descending to grasp height."
+        Bridge → next_action: move_arm(arm="follower_right", position=[0.3, 0.1, 0.05])
+        Bridge → execution_result: success
+        Bridge → camera_frame: [new images]
 
-Step 3: Gemini → control_gripper("open")  # Prepare to grasp
-        Bridge → Executes, captures images
-        Gemini → Sees gripper is open
+Step 3: Bridge → reasoning: "At grasp position. Opening gripper."
+        Bridge → next_action: control_gripper(arm="follower_right", action="open")
+        Bridge → execution_result: success
+        Bridge → camera_frame: [new images]
 
-Step 4: Gemini → control_gripper("close")  # Attempt grasp
-        Bridge → Executes, captures images
-        Gemini → CHECKS GRIPPER CAMERA - "Cube is secured in gripper!"
+Step 4: Bridge → reasoning: "Gripper open. Closing to grasp cube."
+        Bridge → next_action: control_gripper(arm="follower_right", action="close")
+        Bridge → execution_result: success
+        Bridge → camera_frame: [new images showing cube in gripper]
 
-Step 5: Gemini → move_arm([0.3, 0.1, 0.25])  # Lift object
-        Bridge → Executes, captures images
-        Gemini → Confirms lift successful
-
-... continues until task complete
+Step 5: Bridge → reasoning: "Cube secured! Lifting object."
+        Bridge → next_action: move_arm(arm="follower_right", position=[0.3, 0.1, 0.25])
+        Bridge → execution_result: success
+        Bridge → task_complete: true
 ```
 
 ### Available Robot Functions
 
-The bridge exposes these functions to Gemini ER:
+The bridge exposes these functions to Gemini ER. **Note:** All functions require an `arm` parameter to specify which arm to control (e.g., `"follower_right"`, `"follower_left"`).
 
 ```python
-def move_arm(position: list[float] = None, pose: str = None, moving_time: float = 1.5):
+def move_arm(arm: str, position: list[float] = None, pose: str = None, moving_time: float = 1.5):
     """Move robot end effector to target position or named pose.
 
     Args:
+        arm: Which arm to control (required) - e.g., "follower_right"
         position: Target [x, y, z] in meters (relative to robot base)
         pose: Named pose - "home", "ready", or "sleep"
         moving_time: Time to complete movement in seconds
     """
 
-def control_gripper(action: str):
+def control_gripper(arm: str, action: str):
     """Open or close the robot gripper.
 
     Args:
+        arm: Which arm's gripper to control (required)
         action: "open" or "close"
     """
 
-def get_arm_status():
-    """Get current arm state (joints, position, pose)."""
+def get_arm_status(arm: str):
+    """Get current arm state (joints, position, pose).
 
-def get_gripper_status():
-    """Get current gripper state."""
+    Args:
+        arm: Which arm to query (required)
+    """
+
+def get_gripper_status(arm: str):
+    """Get current gripper state.
+
+    Args:
+        arm: Which arm's gripper to query (required)
+    """
 
 def capture_camera_frame(reason: str):
-    """Capture fresh camera frames.
+    """Capture fresh camera frames from all available cameras.
 
     Args:
         reason: Why frames are needed (e.g., "verify_grasp")
@@ -265,9 +312,9 @@ def capture_camera_frame(reason: str):
 - RealSense D405 camera interface
 - RGBD capture (color + depth)
 - Base64 JPEG encoding for API transmission
-- Dual camera support:
-  - `gripper_cam` - Mounted on end-effector (grasp verification)
-  - `top_cam` - Overhead view (spatial planning)
+- Dynamic camera detection:
+  - Cameras are auto-detected and named `camera_0`, `camera_1`, etc.
+  - No hardcoded serial numbers or names required
 
 ### Inactive Components (Not Connected to Current Bridge)
 
@@ -292,9 +339,9 @@ Components:
 
 - Ubuntu 20.04+ or macOS
 - Python 3.8+
-- U2D2 USB adapter connected to `/dev/ttyDXL_follower_right`
-- VX300S robot hardware (right arm)
-- 2x Intel RealSense D405 cameras
+- U2D2 USB adapters connected as `/dev/ttyDXL_follower_*` (auto-detected)
+- VX300S robot hardware (one or more arms)
+- Intel RealSense D405 cameras (auto-detected)
 - Google API key for Gemini
 
 ### Step 1: Install Python Dependencies
@@ -379,14 +426,12 @@ Motor count: 9
 
 ```bash
 cd /home/aloha/gemini-live-dynamix
-python3 er-setup/bridge_simple_er.py
+python3 bridges/bridge_simple_er.py
 ```
 
 **Command-line options:**
 ```bash
-python3 er-setup/bridge_simple_er.py --port 8082 \
-                                      --dxl-port /dev/ttyDXL_follower_right \
-                                      --baudrate 1000000
+python3 bridges/bridge_simple_er.py --port 8082
 ```
 
 **Expected output:**
@@ -397,119 +442,149 @@ Gemini Robotics ER Bridge - Direct Dynamixel Control
 
 Features:
   - Direct hardware control via Dynamixel SDK
-  - Automatic camera capture (gripper_cam + top_cam)
-  - Iterative visual verification
-  - Conversation state maintained
+  - WebSocket communication (ws://localhost:8082/ws)
+  - Real-time streaming of reasoning, actions, and results
+  - Dynamic camera detection
+  - Multi-arm support
 
 ============================================================
 [ER Bridge] Initializing Robot Hardware
 ============================================================
 
-[1/5] Loading robot model...
+Detecting follower ports...
+  ✓ Found: /dev/ttyDXL_follower_right
+  ✓ Found: /dev/ttyDXL_follower_left
+
+Initializing arm stack: follower_right
   ✓ VX300S model loaded (6-DOF, 0.75m reach)
-
-[2/5] Connecting to Dynamixel bus at /dev/ttyDXL_follower_right...
   ✓ Dynamixel controller connected, torque enabled, monitoring at 10Hz
+  ✓ Arm controller ready
+  ✓ Gripper controller ready
 
-[3/5] Initializing arm controller...
-  ✓ Arm controller ready (awaiting connection for opening ceremony)
+Initializing arm stack: follower_left
+  ✓ VX300S model loaded (6-DOF, 0.75m reach)
+  ✓ Dynamixel controller connected, torque enabled, monitoring at 10Hz
+  ✓ Arm controller ready
+  ✓ Gripper controller ready
 
-[4/5] Initializing gripper controller...
-  ✓ Gripper controller ready (awaiting connection)
-
-[5/5] Initializing camera controller...
-  ✓ Camera controller ready (gripper_cam + top_cam)
+Detecting cameras...
+  ✓ Found 2 cameras: camera_0, camera_1
 
 ============================================================
 [ER Bridge] ✓ Robot hardware initialized!
-[ER Bridge] ℹ️  Use /robot/connect to perform opening ceremony
+[ER Bridge] Connected arms: follower_right, follower_left
+[ER Bridge] Available cameras: camera_0, camera_1
 ============================================================
 
-Starting server on http://localhost:8082
-Endpoints:
-  - POST /robotics-er-request
-  - GET /status
-  - POST /robot/connect
-  - POST /robot/disconnect
-  - GET  /robot/status
+Starting WebSocket server on ws://localhost:8082/ws
 ```
 
 ### Using the System
 
-**1. Connect Robot (Opening Ceremony)**
+All communication happens over a single WebSocket connection at `ws://localhost:8082/ws`.
 
-This slowly moves the arm to ready position and opens the gripper:
+#### Message Protocol
 
-```bash
-curl -X POST http://localhost:8082/robot/connect
+**Client → Server Messages:**
+
+| Type | Description | Payload |
+|------|-------------|---------|
+| `task_request` | Submit a new task | `{ "prompt": "Pick up the red cube" }` |
+| `robot_connect` | Perform opening ceremony | `{}` |
+| `robot_disconnect` | Perform closing ceremony | `{}` |
+| `status_request` | Query current state | `{}` |
+
+**Server → Client Messages:**
+
+| Type | Description | Payload |
+|------|-------------|---------|
+| `connection_info` | Sent on connect | `{ "cameras": [...], "connected_arms": [...], "robot_connected": bool }` |
+| `camera_frame` | Camera images | `{ "camera_0": "base64...", "camera_1": "base64..." }` |
+| `reasoning` | Gemini's analysis | `{ "text": "...", "step": 1, "conversation_id": "..." }` |
+| `next_action` | Function to execute | `{ "function": "move_arm", "args": {...}, "step": 1 }` |
+| `execution_result` | Function result | `{ "success": bool, "message": "...", "step": 1 }` |
+| `task_complete` | Task finished | `{ "conversation_id": "...", "total_steps": 10 }` |
+| `robot_status` | Connection state change | `{ "connected": bool, "connected_arms": [...] }` |
+| `error` | Error occurred | `{ "code": "...", "message": "..." }` |
+
+#### Example: Connect and Run Task
+
+**1. Connect to WebSocket**
+```javascript
+const ws = new WebSocket('ws://localhost:8082/ws');
+
+ws.onmessage = (event) => {
+  const msg = JSON.parse(event.data);
+  console.log(`[${msg.type}]`, msg.payload);
+};
 ```
 
-**2. Submit Task**
-
-```bash
-curl -X POST http://localhost:8082/robotics-er-request \
-  -H "Content-Type: application/json" \
-  -d '{
-    "prompt": "Pick up the red cube and move it to the blue cube"
-  }'
-```
-
-**Response format:**
+**2. Receive connection_info (automatic)**
 ```json
 {
-  "success": true,
-  "conversation_id": "uuid-string",
-  "step": 1,
-  "reasoning": "I see a red cube at position [0.3, 0.1]. Moving arm to approach...",
-  "next_action": {
-    "function": "move_arm",
-    "args": {"position": [0.3, 0.1, 0.3]}
-  },
-  "execution_result": {
-    "success": true,
-    "function": "move_arm",
-    "message": "Moved to position [0.300, 0.100, 0.300]"
-  },
-  "images": ["base64_gripper_cam", "base64_top_cam"],
-  "verification_check": "After execution, gripper should be 30cm above cube",
-  "task_complete": false
+  "type": "connection_info",
+  "payload": {
+    "cameras": ["camera_0", "camera_1"],
+    "connected_arms": ["follower_right", "follower_left"],
+    "robot_connected": false
+  }
 }
 ```
 
-**3. Continue Conversation**
-
-The frontend automatically sends feedback requests:
-
-```bash
-curl -X POST http://localhost:8082/robotics-er-request \
-  -H "Content-Type: application/json" \
-  -d '{
-    "conversation_id": "uuid-from-previous-response",
-    "execution_result": {...}
-  }'
+**3. Connect Robot (Opening Ceremony)**
+```javascript
+ws.send(JSON.stringify({ type: "robot_connect", payload: {} }));
 ```
 
-Fresh images are captured automatically and sent with each feedback request.
-
-**4. Disconnect Robot (Closing Ceremony)**
-
-This closes the gripper and slowly moves to sleep position:
-
-```bash
-curl -X POST http://localhost:8082/robot/disconnect
+Server responds with `robot_status`:
+```json
+{
+  "type": "robot_status",
+  "payload": {
+    "connected": true,
+    "connected_arms": ["follower_right", "follower_left"],
+    "message": "Robot connected and ready"
+  }
+}
 ```
 
-**5. Monitor Status**
+**4. Submit Task**
+```javascript
+ws.send(JSON.stringify({
+  type: "task_request",
+  payload: { prompt: "Pick up the red cube" }
+}));
+```
 
-```bash
-# Bridge status
-curl http://localhost:8082/status
+**5. Receive Streaming Updates**
 
-# Robot connection state
-curl http://localhost:8082/robot/status
+The server streams a sequence of messages for each step:
 
-# Individual camera frame
-curl http://localhost:8082/camera/gripper_cam/frame
+```json
+// Initial camera frames
+{ "type": "camera_frame", "payload": { "camera_0": "base64...", "camera_1": "base64..." } }
+
+// Gemini's reasoning
+{ "type": "reasoning", "payload": { "text": "I see a red cube...", "step": 1 } }
+
+// Action to execute
+{ "type": "next_action", "payload": { "function": "move_arm", "args": { "arm": "follower_right", "position": [0.3, 0.1, 0.3] } } }
+
+// Execution result
+{ "type": "execution_result", "payload": { "success": true, "message": "Moved to position" } }
+
+// Updated camera frames
+{ "type": "camera_frame", "payload": { "camera_0": "base64...", "camera_1": "base64..." } }
+
+// ... more steps ...
+
+// Task complete
+{ "type": "task_complete", "payload": { "total_steps": 5 } }
+```
+
+**6. Disconnect Robot (Closing Ceremony)**
+```javascript
+ws.send(JSON.stringify({ type: "robot_disconnect", payload: {} }));
 ```
 
 ---
@@ -714,8 +789,9 @@ rs-enumerate-devices
 
 # Check permissions
 sudo usermod -aG video $USER
+# Log out and back in for changes to take effect
 
-# Update camera serial numbers in camera_controller.py
+# Cameras are auto-detected - no serial number configuration needed
 ```
 
 ### Issue: "GEMINI_API_KEY not set"
@@ -775,6 +851,6 @@ Position limits relative to robot base (meters):
 
 ---
 
-**Last Updated:** 2025-11-20
-**Active Bridge:** `er-setup/bridge_simple_er.py` on port 8082
-**Architecture:** Direct Dynamixel SDK (No ROS2)
+**Last Updated:** 2025-11-26
+**Active Bridge:** `bridges/bridge_simple_er.py` - WebSocket on `ws://localhost:8082/ws`
+**Architecture:** Direct Dynamixel SDK (No ROS2), WebSocket Communication
