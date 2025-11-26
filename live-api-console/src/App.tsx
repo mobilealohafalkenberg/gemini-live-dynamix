@@ -6,22 +6,12 @@
 import { useState, useCallback } from "react";
 import "./App.scss";
 import { ALOHAControl } from "./components/aloha-control/ALOHAControl";
-import { DualCameraView } from "./components/camera-feed/CameraFeed";
-import { CameraFrames, RobotStatus } from "./hooks/useBridgeWebSocket";
+import { RobotStatus } from "./hooks/useBridgeWebSocket";
 
 function App() {
-  // Camera frames from WebSocket (shared between ALOHAControl and DualCameraView)
-  const [cameraFrames, setCameraFrames] = useState<CameraFrames | null>(null);
   const [robotStatus, setRobotStatus] = useState<RobotStatus | null>(null);
   const [wsConnected, setWsConnected] = useState(false);
 
-  // Handle camera frames from ALOHAControl WebSocket
-  const handleCameraFrames = useCallback((frames: CameraFrames) => {
-    setCameraFrames(frames);
-    setWsConnected(true);
-  }, []);
-
-  // Handle robot status changes from WebSocket
   const handleRobotStatusChange = useCallback((status: RobotStatus) => {
     setRobotStatus(status);
     setWsConnected(true);
@@ -38,17 +28,7 @@ function App() {
           </h1>
 
           <div className="main-app-area">
-            {/* Main robot control component with WebSocket */}
-            <ALOHAControl
-              onCameraFrames={handleCameraFrames}
-              onRobotStatusChange={handleRobotStatusChange}
-            />
-
-            {/* Robot camera feeds (receives frames from WebSocket via ALOHAControl) */}
-            <DualCameraView
-              frames={cameraFrames}
-              isConnected={wsConnected && robotConnected}
-            />
+            <ALOHAControl onRobotStatusChange={handleRobotStatusChange} />
           </div>
 
           {/* Status footer */}

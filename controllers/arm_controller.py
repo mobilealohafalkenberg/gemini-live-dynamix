@@ -3,7 +3,7 @@
 """
 Arm Controller API for Mobile ALOHA
 Provides flexible arm control with automatic format detection and conversion
-Designed for integration with Gemini Live API
+Designed for integration with Gemini Robotics-ER 1.5
 
 REFACTORED: Now uses DynamixelController + Modern Robotics IK (No ROS2)
 """

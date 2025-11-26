@@ -10,6 +10,11 @@ import {
   RobotStatus,
 } from '../../hooks/useBridgeWebSocket';
 
+// Props for ALOHAControl
+interface ALOHAControlProps {
+  onRobotStatusChange?: (status: RobotStatus) => void;
+}
+
 // Chat message type for the UI
 interface ChatMessage {
   id: string;
@@ -21,12 +26,6 @@ interface ChatMessage {
     isError?: boolean;
     images?: string[];
   };
-}
-
-// Props for ALOHAControl
-interface ALOHAControlProps {
-  onCameraFrames?: (frames: CameraFrames) => void;
-  onRobotStatusChange?: (status: RobotStatus) => void;
 }
 
 // Chat bubble colors
@@ -43,7 +42,7 @@ const CHAT_COLORS = {
   },
 };
 
-export function ALOHAControl({ onCameraFrames, onRobotStatusChange }: ALOHAControlProps) {
+export function ALOHAControl({ onRobotStatusChange }: ALOHAControlProps) {
   const [taskStatus, setTaskStatus] = useState('Ready');
   const chatEndRef = useRef<HTMLDivElement>(null);
 
@@ -114,8 +113,7 @@ export function ALOHAControl({ onCameraFrames, onRobotStatusChange }: ALOHAContr
 
   const handleCameraFrame = useCallback((frames: CameraFrames) => {
     setCameraImages(frames);
-    onCameraFrames?.(frames);
-  }, [onCameraFrames]);
+  }, []);
 
   const handleRobotStatus = useCallback((status: RobotStatus) => {
     onRobotStatusChange?.(status);
@@ -364,48 +362,35 @@ export function ALOHAControl({ onCameraFrames, onRobotStatusChange }: ALOHAContr
         <div ref={chatEndRef} />
       </div>
 
-      {/* Camera Preview (if images available) */}
-      {cameraImages && (cameraImages.gripper_cam || cameraImages.top_cam) && (
+      {/* Camera Preview (if images available) - Dynamic for any number of cameras */}
+      {cameraImages && Object.keys(cameraImages).length > 0 && (
         <div style={{
           display: 'flex',
           gap: 8,
           marginBottom: 12,
           background: '#111827',
           padding: 8,
-          borderRadius: 6
+          borderRadius: 6,
+          flexWrap: 'wrap'
         }}>
-          {cameraImages.gripper_cam && (
-            <div style={{ flex: 1 }}>
-              <div style={{ fontSize: 10, opacity: 0.6, marginBottom: 4 }}>
-                Gripper Cam
+          {Object.entries(cameraImages).map(([cameraName, imageData]) => (
+            imageData && (
+              <div key={cameraName} style={{ flex: 1, minWidth: 150 }}>
+                <div style={{ fontSize: 10, opacity: 0.6, marginBottom: 4 }}>
+                  {cameraName.replace('_', ' ').replace(/\b\w/g, c => c.toUpperCase())}
+                </div>
+                <img
+                  src={`data:image/jpeg;base64,${imageData}`}
+                  alt={cameraName}
+                  style={{
+                    width: '100%',
+                    borderRadius: 4,
+                    border: '1px solid #374151',
+                  }}
+                />
               </div>
-              <img
-                src={`data:image/jpeg;base64,${cameraImages.gripper_cam}`}
-                alt="Gripper camera"
-                style={{
-                  width: '100%',
-                  borderRadius: 4,
-                  border: '1px solid #374151',
-                }}
-              />
-            </div>
-          )}
-          {cameraImages.top_cam && (
-            <div style={{ flex: 1 }}>
-              <div style={{ fontSize: 10, opacity: 0.6, marginBottom: 4 }}>
-                Top Cam
-              </div>
-              <img
-                src={`data:image/jpeg;base64,${cameraImages.top_cam}`}
-                alt="Top camera"
-                style={{
-                  width: '100%',
-                  borderRadius: 4,
-                  border: '1px solid #374151',
-                }}
-              />
-            </div>
-          )}
+            )
+          ))}
         </div>
       )}
 

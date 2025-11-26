@@ -12,9 +12,9 @@ export interface WebSocketMessage {
   payload: any;
 }
 
+// Dynamic camera frames - keys are camera names (e.g., camera_0, camera_1)
 export interface CameraFrames {
-  gripper_cam: string;
-  top_cam: string;
+  [cameraName: string]: string;
 }
 
 export interface RobotStatus {

@@ -310,7 +310,10 @@ async def initialize_robot_handler(request):
         print(f"\n[Cameras] Initializing camera controller...")
         camera_controller = CameraController()
         camera_init = camera_controller.initialize()
-        print(f"  ✓ Camera controller ready (gripper_cam + top_cam)")
+        if camera_init:
+            print(f"  Camera controller ready: {camera_controller.get_camera_names()}")
+        else:
+            print(f"  Camera controller failed to initialize")
 
         # Return status
         connected_arms = [arm_id for arm_id, success in init_results.items() if success]
@@ -547,62 +550,94 @@ async def execute_robot_function(next_action: dict) -> dict:
     return result
 
 
-def capture_camera_images() -> list:
+def capture_camera_images() -> dict:
     """
-    Capture images from both cameras.
+    Capture images from all available cameras.
 
     Returns:
-        List of two base64-encoded JPEG images [gripper_cam, top_cam]
+        Dict mapping camera names to base64-encoded JPEG images
     """
-    images = []
+    images = {}
 
     try:
-        # Capture gripper camera (first) - get base64 encoded JPEG
-        gripper_img = camera_controller.get_frame_base64('gripper_cam')
-        images.append(gripper_img if gripper_img else '')
+        if camera_controller and camera_controller.initialized:
+            # Get all available camera frames dynamically
+            images = camera_controller.get_all_frames_base64()
 
-        # Capture top/overhead camera (second) - get base64 encoded JPEG
-        top_img = camera_controller.get_frame_base64('top_cam')
-        images.append(top_img if top_img else '')
-
-        print(f"[ER Bridge] Captured camera images: gripper={len(gripper_img) if gripper_img else 0}B, top={len(top_img) if top_img else 0}B")
+            # Log capture results
+            if images:
+                sizes = [f"{name}={len(img)}B" for name, img in images.items()]
+                print(f"[ER Bridge] Captured camera images: {', '.join(sizes)}")
+            else:
+                print("[ER Bridge] No camera frames available")
+        else:
+            print("[ER Bridge] Camera controller not initialized")
 
     except Exception as e:
         print(f"[ER Bridge] Camera capture error: {e}")
-        images = ['', '']
+        images = {}
 
     return images
 
 
 def get_current_robot_state() -> dict:
     """
-    Get current robot state for context.
+    Get current robot state for all connected arms.
 
     Returns:
-        Dict with joints, end_effector_position, gripper_position
+        Dict with per-arm state and backward-compatible top-level keys:
+        - arms: {arm_id: {joints, end_effector_position, gripper_position}}
+        - joints, end_effector_position, gripper_position: first arm's state (backward compat)
     """
     state = {
+        'arms': {},
         'joints': [],
         'end_effector_position': {'x': 0, 'y': 0, 'z': 0},
         'gripper_position': 0
     }
 
-    try:
-        # Get arm state
-        arm_state = arm_controller.get_arm_state()
-        if arm_state:
-            state['joints'] = list(arm_state.get('joint_angles', []))
-            ee_pos = arm_state.get('end_effector_position', {})
-            state['end_effector_position'] = {
-                'x': ee_pos.get('x', 0),
-                'y': ee_pos.get('y', 0),
-                'z': ee_pos.get('z', 0)
-            }
+    if not arm_controllers:
+        return state
 
-        # Get gripper state
-        gripper_state = gripper_controller.get_gripper_state()
-        if gripper_state:
-            state['gripper_position'] = gripper_state.get('position', 0)
+    try:
+        first_arm_processed = False
+
+        for arm_id, stack in arm_controllers.items():
+            try:
+                arm_ctrl = stack['arm']
+                gripper_ctrl = stack['gripper']
+
+                arm_state = arm_ctrl.get_arm_state()
+                gripper_state = gripper_ctrl.get_gripper_state()
+
+                joints = list(arm_state.get('joint_angles', [])) if arm_state else []
+                ee_pos = arm_state.get('end_effector_position', {}) if arm_state else {}
+                gripper_pos = gripper_state.get('position', 0) if gripper_state else 0
+
+                state['arms'][arm_id] = {
+                    'joints': joints,
+                    'end_effector_position': {
+                        'x': ee_pos.get('x', 0),
+                        'y': ee_pos.get('y', 0),
+                        'z': ee_pos.get('z', 0)
+                    },
+                    'gripper_position': gripper_pos
+                }
+
+                # Set top-level keys from first arm for backward compatibility
+                if not first_arm_processed:
+                    state['joints'] = joints
+                    state['end_effector_position'] = {
+                        'x': ee_pos.get('x', 0),
+                        'y': ee_pos.get('y', 0),
+                        'z': ee_pos.get('z', 0)
+                    }
+                    state['gripper_position'] = gripper_pos
+                    first_arm_processed = True
+
+            except Exception as e:
+                print(f"[ER Bridge] Error getting state for {arm_id}: {e}")
+                state['arms'][arm_id] = {'error': str(e)}
 
     except Exception as e:
         print(f"[ER Bridge] Error getting robot state: {e}")
@@ -634,7 +669,7 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
 
     # Send connection info
     await send_ws(ws, 'connection_info', {
-        'cameras': ['gripper_cam', 'top_cam'] if camera_controller and camera_controller.initialized else [],
+        'cameras': camera_controller.get_camera_names() if camera_controller and camera_controller.initialized else [],
         'connected_arms': list(arm_controllers.keys()),
         'robot_connected': robot_connected
     })
@@ -689,12 +724,9 @@ async def handle_ws_task_request(ws: web.WebSocketResponse, payload: dict):
     print(f"[WebSocket] NEW TASK: {prompt}")
     print(f"{'=' * 60}")
 
-    # Capture and broadcast camera images
+    # Capture and broadcast camera images (dynamic dict of camera_name -> base64)
     images = capture_camera_images()
-    await send_ws(ws, 'camera_frame', {
-        'gripper_cam': images[0] if len(images) > 0 else '',
-        'top_cam': images[1] if len(images) > 1 else ''
-    })
+    await send_ws(ws, 'camera_frame', images)
 
     # Get current robot state
     current_state = get_current_robot_state()
@@ -715,8 +747,8 @@ async def handle_ws_task_request(ws: web.WebSocketResponse, payload: dict):
     # Build content parts
     content_parts = [types.Part(text=context_prompt)]
 
-    # Add images
-    for img_b64 in images:
+    # Add images (iterate over dict values)
+    for img_b64 in images.values():
         if img_b64 and img_b64.strip():
             image_bytes = base64.b64decode(img_b64)
             image_part = types.Part.from_bytes(data=image_bytes, mime_type='image/jpeg')
@@ -826,12 +858,9 @@ async def execute_task_loop(ws: web.WebSocketResponse, conversation_id: str):
             'details': execution_result
         })
 
-        # Capture new images after execution
+        # Capture new images after execution (dynamic dict)
         images = capture_camera_images()
-        await send_ws(ws, 'camera_frame', {
-            'gripper_cam': images[0] if len(images) > 0 else '',
-            'top_cam': images[1] if len(images) > 1 else ''
-        })
+        await send_ws(ws, 'camera_frame', images)
 
         # Build feedback for next iteration
         feedback_text = f"""EXECUTION RESULT (Step {step}):
@@ -846,9 +875,9 @@ Success: {execution_result.get('success', False)}
 
         feedback_text += "\nNEW CAMERA IMAGES (above) show current state. Verify and decide next action."
 
-        # Add feedback to history
+        # Add feedback to history (iterate over dict values)
         feedback_parts = [types.Part(text=feedback_text)]
-        for img_b64 in images:
+        for img_b64 in images.values():
             if img_b64 and img_b64.strip():
                 image_bytes = base64.b64decode(img_b64)
                 feedback_parts.append(types.Part.from_bytes(data=image_bytes, mime_type='image/jpeg'))
@@ -963,7 +992,7 @@ async def handle_ws_status_request(ws: web.WebSocketResponse):
     await send_ws(ws, 'robot_status', {
         'connected': robot_connected,
         'connected_arms': list(arm_controllers.keys()),
-        'cameras': ['gripper_cam', 'top_cam'] if camera_controller and camera_controller.initialized else []
+        'cameras': camera_controller.get_camera_names() if camera_controller and camera_controller.initialized else []
     })
 
 
@@ -1193,7 +1222,7 @@ async def handle_initial(data: dict, request_start_time: float) -> web.Response:
 
     # Capture camera images automatically
     images = capture_camera_images()
-    print(f"Images: {len(images)} frames captured (gripper_cam, top_cam)")
+    print(f"Images: {len(images)} camera(s) captured: {list(images.keys())}")
 
     # Get current robot state automatically
     current_state = get_current_robot_state()
@@ -1231,7 +1260,13 @@ async def handle_initial(data: dict, request_start_time: float) -> web.Response:
         'gripper_fingers': 0.025
     }
 
-    workspace_bounds = robot_model.workspace_limits if robot_model else {
+    # Get robot model from arm_controllers for workspace limits
+    robot_model_instance = None
+    if arm_controllers:
+        first_arm = list(arm_controllers.values())[0]
+        robot_model_instance = first_arm.get('model')
+
+    workspace_bounds = robot_model_instance.workspace_limits if robot_model_instance else {
         'x': (0.15, 0.50),
         'y': (-0.30, 0.30),
         'z': (0.05, 0.40)
@@ -1843,181 +1878,6 @@ def parse_iterative_response(response) -> dict:
     return result
 
 
-async def handle_status(request: web.Request) -> web.Response:
-    """Status endpoint"""
-    robot_initialized = dynamixel_controller is not None
-    return web.json_response({
-        'bridge': 'simple_er_iterative',
-        'sdk': 'google-genai',
-        'status': 'running',
-        'mode': 'iterative_with_visual_verification',
-        'active_conversations': len(conversations),
-        'api_key_set': bool(os.getenv('GEMINI_API_KEY')),
-        'robot_initialized': robot_initialized,
-        'robot_connected': robot_connected
-    })
-
-
-async def handle_robot_connect(request: web.Request) -> web.Response:
-    """
-    Connect to robot and perform opening ceremony.
-
-    This moves the arm slowly to ready position and prepares the gripper.
-    Should be called when user clicks "Connect Robot" button.
-    """
-    global robot_connected
-
-    if not dynamixel_controller:
-        return web.json_response({
-            'success': False,
-            'error': 'Robot hardware not initialized'
-        }, status=500)
-
-    if robot_connected:
-        return web.json_response({
-            'success': False,
-            'error': 'Robot already connected',
-            'state': 'connected'
-        }, status=400)
-
-    try:
-        print("\n" + "=" * 60)
-        print("[ER Bridge] 🎬 OPENING CEREMONY - Connecting Robot")
-        print("=" * 60)
-
-        # Perform opening ceremony (move arm to ready position slowly)
-        print("\n[Opening Ceremony] Moving arm to ready position...")
-        ceremony_result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: arm_controller.opening_ceremony(moving_time=4.0, blocking=True)
-        )
-
-        if not ceremony_result.get('success'):
-            error_msg = ceremony_result.get('error', 'Opening ceremony failed')
-            print(f"[Opening Ceremony] ✗ Failed: {error_msg}")
-            return web.json_response({
-                'success': False,
-                'error': error_msg,
-                'state': 'disconnected'
-            }, status=500)
-
-        # Open gripper to neutral position
-        print("[Opening Ceremony] Opening gripper...")
-        gripper_result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            gripper_controller.open_gripper
-        )
-
-        robot_connected = True
-
-        print("\n" + "=" * 60)
-        print("[ER Bridge] ✓ Opening ceremony complete - Robot ready!")
-        print("=" * 60 + "\n")
-
-        # Get current state
-        arm_state = arm_controller.get_arm_state()
-        gripper_state = gripper_controller.get_gripper_state()
-
-        return web.json_response({
-            'success': True,
-            'state': 'connected',
-            'message': 'Robot connected and ready',
-            'arm_state': arm_state,
-            'gripper_state': gripper_state
-        })
-
-    except Exception as e:
-        print(f"[ER Bridge] ✗ Opening ceremony error: {e}")
-        import traceback
-        traceback.print_exc()
-        return web.json_response({
-            'success': False,
-            'error': str(e),
-            'state': 'disconnected'
-        }, status=500)
-
-
-async def handle_robot_disconnect(request: web.Request) -> web.Response:
-    """
-    Disconnect from robot and perform closing ceremony.
-
-    This moves the arm slowly to sleep position and keeps torque ON
-    so the arm holds its position safely.
-    Should be called when user clicks "Disconnect Robot" button.
-    """
-    global robot_connected
-
-    if not dynamixel_controller:
-        return web.json_response({
-            'success': False,
-            'error': 'Robot hardware not initialized'
-        }, status=500)
-
-    if not robot_connected:
-        return web.json_response({
-            'success': False,
-            'error': 'Robot not connected',
-            'state': 'disconnected'
-        }, status=400)
-
-    try:
-        print("\n" + "=" * 60)
-        print("[ER Bridge] 🎬 CLOSING CEREMONY - Disconnecting Robot")
-        print("=" * 60)
-
-        # Close gripper first
-        print("\n[Closing Ceremony] Closing gripper...")
-        await asyncio.get_event_loop().run_in_executor(
-            None,
-            gripper_controller.close_gripper
-        )
-
-        # Perform closing ceremony (move arm to sleep position slowly)
-        print("[Closing Ceremony] Moving arm to sleep position...")
-        ceremony_result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: arm_controller.closing_ceremony(moving_time=4.0, blocking=True)
-        )
-
-        if not ceremony_result.get('success'):
-            error_msg = ceremony_result.get('error', 'Closing ceremony failed')
-            print(f"[Closing Ceremony] ✗ Failed: {error_msg}")
-            return web.json_response({
-                'success': False,
-                'error': error_msg,
-                'state': 'connected'
-            }, status=500)
-
-        robot_connected = False
-
-        print("\n" + "=" * 60)
-        print("[ER Bridge] ✓ Closing ceremony complete - Robot in sleep position")
-        print("[ER Bridge] ℹ️  Torque remains ON to hold position safely")
-        print("=" * 60 + "\n")
-
-        # Get final state
-        arm_state = arm_controller.get_arm_state()
-        gripper_state = gripper_controller.get_gripper_state()
-
-        return web.json_response({
-            'success': True,
-            'state': 'disconnected',
-            'message': 'Robot disconnected - arm in sleep position with torque on',
-            'arm_state': arm_state,
-            'gripper_state': gripper_state
-        })
-
-    except Exception as e:
-        print(f"[ER Bridge] ✗ Closing ceremony error: {e}")
-        import traceback
-        traceback.print_exc()
-        return web.json_response({
-            'success': False,
-            'error': str(e),
-            'state': 'connected'
-        }, status=500)
-
-
 async def handle_robot_status(request: web.Request) -> web.Response:
     """
     Get current robot status for all connected arms.
@@ -2081,7 +1941,10 @@ async def handle_camera_frame(request: web.Request) -> web.Response:
     """Get a frame from a specific camera."""
     global camera_controller
 
-    camera_name = request.match_info.get('camera_name', 'gripper_cam')
+    # Get camera name from request, default to first available camera
+    camera_names = camera_controller.get_camera_names() if camera_controller and camera_controller.initialized else []
+    default_camera = camera_names[0] if camera_names else 'camera_0'
+    camera_name = request.match_info.get('camera_name', default_camera)
 
     if not camera_controller or not camera_controller.initialized:
         return web.json_response({
@@ -2120,7 +1983,7 @@ async def handle_camera_info(request: web.Request) -> web.Response:
     return web.json_response({
         'success': True,
         'initialized': camera_controller.initialized,
-        'cameras': ['gripper_cam', 'top_cam'] if camera_controller.initialized else []
+        'cameras': camera_controller.get_camera_names() if camera_controller.initialized else []
     })
 
 
@@ -2147,9 +2010,6 @@ def make_app() -> web.Application:
     # Add routes
     app.router.add_post('/initialize', initialize_robot_handler)
     app.router.add_post('/robotics-er-request', handle_er_request)
-    app.router.add_get('/status', handle_status)
-    app.router.add_post('/robot/connect', handle_robot_connect)
-    app.router.add_post('/robot/disconnect', handle_robot_disconnect)
     app.router.add_get('/robot/status', handle_robot_status)
 
     # Camera endpoints (for frontend compatibility)
@@ -2187,7 +2047,7 @@ if __name__ == '__main__':
     print()
     print("Features:")
     print("  - Direct hardware control via Dynamixel SDK")
-    print("  - Automatic camera capture (gripper_cam + top_cam)")
+    print("  - Dynamic camera detection and capture")
     print("  - Iterative visual verification")
     print("  - Conversation state maintained")
     print()
