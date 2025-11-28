@@ -8,24 +8,24 @@ motors:
     Drive_Mode: 0  # Normal
     Min_Position: 0
     Max_Position: 4095
-    Velocity_Limit: 50
+    Velocity_Limit: 131
 
   2:  # Shoulder (Primary)
     ID: 2
     Model: "XM540-W270"
     Drive_Mode: 1  # REVERSED
-    Min_Position: 800
-    Max_Position: 3045
-    Velocity_Limit: 50
+    Min_Position: 841
+    Max_Position: 2867
+    Velocity_Limit: 131
     Secondary_ID: 3  # Shadow motor
 
   3:  # Shoulder Shadow
     ID: 3
     Model: "XM540-W270"
     Drive_Mode: 0  # Normal
-    Min_Position: 800
-    Max_Position: 3045
-    Velocity_Limit: 50
+    Min_Position: 841
+    Max_Position: 2867
+    Velocity_Limit: 131
     Secondary_ID: 2  # Mirrors motor 2
 
   4:  # Elbow (Primary)
@@ -34,7 +34,7 @@ motors:
     Drive_Mode: 1  # REVERSED
     Min_Position: 898
     Max_Position: 3094
-    Velocity_Limit: 50
+    Velocity_Limit: 131
     Secondary_ID: 5  # Shadow motor
 
   5:  # Elbow Shadow
@@ -43,7 +43,7 @@ motors:
     Drive_Mode: 0  # Normal
     Min_Position: 898
     Max_Position: 3094
-    Velocity_Limit: 50
+    Velocity_Limit: 131
     Secondary_ID: 4  # Mirrors motor 4
 
   6:  # Forearm Roll
@@ -52,7 +52,7 @@ motors:
     Drive_Mode: 0
     Min_Position: 0
     Max_Position: 4095
-    Velocity_Limit: 50
+    Velocity_Limit: 131
 
   7:  # Wrist Angle
     ID: 7
@@ -60,7 +60,7 @@ motors:
     Drive_Mode: 1  # REVERSED
     Min_Position: 830
     Max_Position: 3504
-    Velocity_Limit: 50
+    Velocity_Limit: 131
 
   8:  # Wrist Rotate
     ID: 8
@@ -68,14 +68,14 @@ motors:
     Drive_Mode: 0
     Min_Position: 0
     Max_Position: 4095
-    Velocity_Limit: 50
+    Velocity_Limit: 131
 
   9:  # Gripper
     ID: 9
     Model: "XM430-W350"
     Drive_Mode: 0
     Min_Position: 0
-    Max_Position: 3070
+    Max_Position: 4095
     Velocity_Limit: 131
 
 groups:
@@ -91,5 +91,5 @@ grippers:
 # Named poses (in radians for joints 1-6)
 poses:
   home: [0.0, -0.3, 0.6, 0.0, -0.3, 0.0]
-  sleep: [0.0, -1.69, 1.55, 0.0, 0.8, 0.0]
+  sleep: [0.0, -1.85, 1.55, 0.0, 0.8, 0.0]
   ready: [0.0, -0.96, 1.16, 0.0, -0.3, 0.0]
