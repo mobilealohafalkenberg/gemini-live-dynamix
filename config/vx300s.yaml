@@ -93,3 +93,9 @@ poses:
   home: [0.0, -0.3, 0.6, 0.0, -0.3, 0.0]
   sleep: [0.0, -1.69, 1.55, 0.0, 0.8, 0.0]
   ready: [0.0, -0.96, 1.16, 0.0, -0.3, 0.0]
+
+# Camera serial number to name mapping
+cameras:
+  "130322270224": "right_gripper"
+  "130322273632": "left_gripper"
+  "130322273629": "overhead_camera"

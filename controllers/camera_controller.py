@@ -11,6 +11,8 @@ import numpy as np
 import threading
 import time
 import base64
+import yaml
+import os
 from typing import Optional, Dict, List, Tuple
 import pyrealsense2 as rs
 
@@ -21,8 +23,13 @@ class CameraController:
     Provides RGB streams with dynamic camera detection.
     """
 
-    def __init__(self):
-        """Initialize camera controller"""
+    def __init__(self, config_path: str = None):
+        """Initialize camera controller
+
+        Args:
+            config_path: Path to config file with camera serial-to-name mapping.
+                        If None, uses default path config/vx300s.yaml
+        """
         self.pipelines = {}
         self.configs = {}
         self.cameras = {}  # name -> serial mapping
@@ -32,12 +39,37 @@ class CameraController:
         self.running = False
         self.initialized = False
 
+        # Serial to name mapping (loaded from config)
+        self.serial_to_name = {}
+        self._load_camera_config(config_path)
+
         # Camera configuration (RGB only)
         self.camera_config = {
             'resolution': (640, 480),
             'fps': 30,
             'color_format': rs.format.rgb8,
         }
+
+    def _load_camera_config(self, config_path: str = None):
+        """Load camera serial-to-name mapping from config file."""
+        if config_path is None:
+            # Default path relative to this file
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            config_path = os.path.join(base_dir, 'config', 'vx300s.yaml')
+
+        try:
+            if os.path.exists(config_path):
+                with open(config_path, 'r') as f:
+                    config = yaml.safe_load(f)
+                    if config and 'cameras' in config:
+                        self.serial_to_name = config['cameras']
+                        print(f"[CameraController] Loaded camera mapping: {self.serial_to_name}")
+                    else:
+                        print("[CameraController] No camera mapping in config, using generic names")
+            else:
+                print(f"[CameraController] Config file not found: {config_path}")
+        except Exception as e:
+            print(f"[CameraController] Error loading config: {e}")
 
     def initialize(self) -> bool:
         """
@@ -58,10 +90,11 @@ class CameraController:
 
             print(f"[CameraController] Found {len(devices)} RealSense devices")
 
-            # Initialize each available camera with generic naming
+            # Initialize each available camera with name from config (or generic fallback)
             for i, dev in enumerate(devices):
                 serial = dev.get_info(rs.camera_info.serial_number)
-                name = f'camera_{i}'
+                # Use config name if available, otherwise fall back to generic name
+                name = self.serial_to_name.get(serial, f'camera_{i}')
 
                 print(f"[CameraController] Initializing {name} (serial: {serial})")
 
@@ -233,6 +266,30 @@ class CameraController:
                     consecutive_errors = 0
                 time.sleep(0.1)
 
+    def _add_label_to_frame(self, frame: np.ndarray, label: str) -> np.ndarray:
+        """
+        Add camera label banner to top of frame.
+
+        Args:
+            frame: RGB numpy array
+            label: Text label to add
+
+        Returns:
+            Frame with label overlay
+        """
+        h, w = frame.shape[:2]
+        result = frame.copy()
+
+        # Draw semi-transparent dark banner at top
+        overlay = result.copy()
+        cv2.rectangle(overlay, (0, 0), (w, 32), (40, 40, 40), -1)
+        result = cv2.addWeighted(overlay, 0.7, result, 0.3, 0)
+
+        # Add white text
+        cv2.putText(result, label, (10, 24),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        return result
+
     def get_frame(self, camera_name: str) -> Optional[np.ndarray]:
         """
         Get the latest RGB frame from a camera.
@@ -263,13 +320,14 @@ class CameraController:
         rgb = self.get_frame(camera_name)
         return rgb, None
 
-    def get_frame_base64(self, camera_name: str, quality: int = 85) -> Optional[str]:
+    def get_frame_base64(self, camera_name: str, quality: int = 85, add_label: bool = True) -> Optional[str]:
         """
-        Get RGB frame as base64-encoded JPEG.
+        Get RGB frame as base64-encoded JPEG with optional label overlay.
 
         Args:
             camera_name: Name of the camera
             quality: JPEG quality (1-100)
+            add_label: Whether to add camera name label to image
 
         Returns:
             Base64-encoded JPEG string or None
@@ -279,6 +337,10 @@ class CameraController:
             return None
 
         try:
+            # Add label overlay if requested
+            if add_label:
+                frame = self._add_label_to_frame(frame, camera_name)
+
             # Convert RGB to BGR for OpenCV
             bgr_frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 

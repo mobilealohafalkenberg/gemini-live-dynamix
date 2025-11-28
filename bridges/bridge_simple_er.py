@@ -72,6 +72,9 @@ camera_controller = None
 # System state
 robot_connected = False  # Track if robot has completed opening ceremony
 
+# Camera order for Gemini (left-to-right visual layout)
+CAMERA_ORDER = ['left_gripper', 'overhead_camera', 'right_gripper']
+
 # WebSocket client management
 ws_clients: set = set()  # Connected WebSocket clients
 ws_sequence = 0  # Message sequence number for ordering
@@ -383,12 +386,16 @@ def shutdown_robot():
 
     print("\n[ER Bridge] Shutting down robot...")
 
-    # Shutdown all arms
+    # All motor IDs: 1-8 arm joints + 9 gripper
+    ALL_MOTOR_IDS = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+
+    # Shutdown all arms - explicitly disable torque on ALL motors
     for arm_id, arm_stack in arm_controllers.items():
         try:
             dxl_controller = arm_stack.get('dxl')
             if dxl_controller:
-                dxl_controller.disable_torque()
+                # Explicitly disable torque on all motors including gripper
+                dxl_controller.disable_torque(ALL_MOTOR_IDS)
                 dxl_controller.close()
                 print(f"  ✓ {arm_id} controller shutdown")
         except Exception as e:
@@ -485,12 +492,16 @@ async def execute_robot_function(next_action: dict) -> dict:
                 x, y, z = position
                 move_result = await asyncio.get_event_loop().run_in_executor(
                     None,
-                    lambda: arm_ctrl.move_to_position(x, y, z, moving_time=moving_time, blocking=True)
+                    lambda: arm_ctrl.move_to_position(position=[x, y, z], moving_time=moving_time, blocking=True)
                 )
                 result['success'] = move_result.get('success', False)
                 result['arm'] = arm_id
                 result['new_position'] = position
-                result['message'] = f"Moved {arm_id} to position [{x:.3f}, {y:.3f}, {z:.3f}]"
+                if move_result.get('success'):
+                    result['message'] = f"Moved {arm_id} to position [{x:.3f}, {y:.3f}, {z:.3f}]"
+                else:
+                    result['message'] = move_result.get('error', 'Move failed')
+                    result['error'] = move_result.get('error')
             else:
                 result['error'] = 'move_arm requires either position or pose argument'
                 result['arm'] = arm_id
@@ -564,9 +575,9 @@ def capture_camera_images() -> dict:
             # Get all available camera frames dynamically
             images = camera_controller.get_all_frames_base64()
 
-            # Log capture results
+            # Log capture results in explicit order (left-to-right)
             if images:
-                sizes = [f"{name}={len(img)}B" for name, img in images.items()]
+                sizes = [f"{name}={len(images[name])}B" for name in CAMERA_ORDER if name in images]
                 print(f"[ER Bridge] Captured camera images: {', '.join(sizes)}")
             else:
                 print("[ER Bridge] No camera frames available")
@@ -742,17 +753,20 @@ async def handle_ws_task_request(ws: web.WebSocketResponse, payload: dict):
     conversation_id = str(uuid.uuid4())
 
     # Build context prompt (reuse existing logic)
-    context_prompt = build_context_prompt(prompt, current_state)
+    camera_names = list(images.keys()) if images else []
+    context_prompt = build_context_prompt(prompt, current_state, camera_names)
 
     # Build content parts
     content_parts = [types.Part(text=context_prompt)]
 
-    # Add images (iterate over dict values)
-    for img_b64 in images.values():
-        if img_b64 and img_b64.strip():
-            image_bytes = base64.b64decode(img_b64)
-            image_part = types.Part.from_bytes(data=image_bytes, mime_type='image/jpeg')
-            content_parts.append(image_part)
+    # Add images in explicit order (left-to-right visual layout)
+    for camera_name in CAMERA_ORDER:
+        if camera_name in images:
+            img_b64 = images[camera_name]
+            if img_b64 and img_b64.strip():
+                image_bytes = base64.b64decode(img_b64)
+                image_part = types.Part.from_bytes(data=image_bytes, mime_type='image/jpeg')
+                content_parts.append(image_part)
 
     # Initialize conversation history
     conversation_history = [
@@ -780,7 +794,7 @@ async def execute_task_loop(ws: web.WebSocketResponse, conversation_id: str):
         return
 
     conv = conversations[conversation_id]
-    max_steps = 20  # Safety limit
+    max_steps = 5  # Safety limit
 
     while conv['step'] < max_steps:
         conv['step'] += 1
@@ -875,12 +889,14 @@ Success: {execution_result.get('success', False)}
 
         feedback_text += "\nNEW CAMERA IMAGES (above) show current state. Verify and decide next action."
 
-        # Add feedback to history (iterate over dict values)
+        # Add feedback to history (images in explicit order, left-to-right)
         feedback_parts = [types.Part(text=feedback_text)]
-        for img_b64 in images.values():
-            if img_b64 and img_b64.strip():
-                image_bytes = base64.b64decode(img_b64)
-                feedback_parts.append(types.Part.from_bytes(data=image_bytes, mime_type='image/jpeg'))
+        for camera_name in CAMERA_ORDER:
+            if camera_name in images:
+                img_b64 = images[camera_name]
+                if img_b64 and img_b64.strip():
+                    image_bytes = base64.b64decode(img_b64)
+                    feedback_parts.append(types.Part.from_bytes(data=image_bytes, mime_type='image/jpeg'))
 
         conv['history'].append(types.Content(role='user', parts=feedback_parts))
 
@@ -907,27 +923,29 @@ async def handle_ws_robot_connect(ws: web.WebSocketResponse):
     try:
         print("\n[WebSocket] 🎬 OPENING CEREMONY")
 
-        # Get first arm for ceremony (or all arms)
-        first_arm_id = list(arm_controllers.keys())[0]
-        arm_stack = arm_controllers[first_arm_id]
-        arm_ctrl = arm_stack['arm']
-        gripper_ctrl = arm_stack['gripper']
+        # Perform opening ceremony on ALL arms
+        for arm_id, arm_stack in arm_controllers.items():
+            arm_ctrl = arm_stack['arm']
+            gripper_ctrl = arm_stack['gripper']
 
-        # Perform opening ceremony
-        ceremony_result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: arm_ctrl.opening_ceremony(moving_time=4.0, blocking=True)
-        )
+            print(f"  [{arm_id}] Moving to ready position...")
+            ceremony_result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda ac=arm_ctrl: ac.opening_ceremony(moving_time=4.0, blocking=True)
+            )
 
-        if not ceremony_result.get('success'):
-            await send_ws(ws, 'error', {
-                'code': 'CEREMONY_FAILED',
-                'message': ceremony_result.get('error', 'Opening ceremony failed')
-            })
-            return
+            if not ceremony_result.get('success'):
+                await send_ws(ws, 'error', {
+                    'code': 'CEREMONY_FAILED',
+                    'message': f'{arm_id}: {ceremony_result.get("error", "Opening ceremony failed")}'
+                })
+                return
 
-        # Open gripper
-        await asyncio.get_event_loop().run_in_executor(None, gripper_ctrl.open_gripper)
+            # Open gripper
+            await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda gc=gripper_ctrl: gc.open_gripper()
+            )
 
         robot_connected = True
 
@@ -959,19 +977,22 @@ async def handle_ws_robot_disconnect(ws: web.WebSocketResponse):
     try:
         print("\n[WebSocket] 🎬 CLOSING CEREMONY")
 
-        first_arm_id = list(arm_controllers.keys())[0]
-        arm_stack = arm_controllers[first_arm_id]
-        arm_ctrl = arm_stack['arm']
-        gripper_ctrl = arm_stack['gripper']
+        # Perform closing ceremony on ALL arms
+        for arm_id, arm_stack in arm_controllers.items():
+            arm_ctrl = arm_stack['arm']
+            gripper_ctrl = arm_stack['gripper']
 
-        # Close gripper
-        await asyncio.get_event_loop().run_in_executor(None, gripper_ctrl.close_gripper)
+            # Close gripper
+            await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda gc=gripper_ctrl: gc.close_gripper()
+            )
 
-        # Perform closing ceremony
-        ceremony_result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: arm_ctrl.closing_ceremony(moving_time=4.0, blocking=True)
-        )
+            print(f"  [{arm_id}] Moving to sleep position...")
+            ceremony_result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda ac=arm_ctrl: ac.closing_ceremony(moving_time=4.0, blocking=True)
+            )
 
         robot_connected = False
 
@@ -996,14 +1017,17 @@ async def handle_ws_status_request(ws: web.WebSocketResponse):
     })
 
 
-def build_context_prompt(prompt: str, current_state: dict) -> str:
-    """Build the context prompt for Gemini (extracted for reuse)."""
-    # Get robot model for specs
-    robot_model_instance = None
-    if arm_controllers:
-        first_arm = list(arm_controllers.values())[0]
-        robot_model_instance = first_arm.get('model')
+def _build_camera_descriptions(camera_names: list) -> str:
+    """Build dynamic camera descriptions based on available cameras."""
+    if not camera_names:
+        return "No cameras available."
 
+    names_str = ", ".join(camera_names)
+    return f"You will receive {len(camera_names)} camera image(s). Each image has a label identifying the camera: {names_str}"
+
+
+def build_context_prompt(prompt: str, current_state: dict, camera_names: list = None) -> str:
+    """Build the context prompt for Gemini (extracted for reuse)."""
     joint_limits_deg = {
         'waist': '[-180°, 180°]',
         'shoulder': '[-108°, 114°]',
@@ -1021,12 +1045,6 @@ def build_context_prompt(prompt: str, current_state: dict) -> str:
         'forearm': 0.200,
         'wrist_to_gripper': 0.065,
         'gripper_fingers': 0.025
-    }
-
-    workspace_bounds = robot_model_instance.workspace_limits if robot_model_instance else {
-        'x': (0.15, 0.50),
-        'y': (-0.30, 0.30),
-        'z': (0.05, 0.40)
     }
 
     robot_base = [0, 0, 0]
@@ -1091,28 +1109,11 @@ CURRENT JOINTS (degrees): {current_joints_deg}
 END-EFFECTOR POSITION: {ee_pos_str} meters (relative to robot base)
 GRIPPER STATE: {gripper_state_str} (position: {gripper_pos:.3f}m)
 
-WORKSPACE BOUNDS (relative to robot base, in meters):
-- X: {workspace_bounds.get('x', [0.1, 0.6])} (X+ forward, X- backward)
-- Y: {workspace_bounds.get('y', [-0.3, 0.3])} (Y+ left, Y- right)
-- Z: {workspace_bounds.get('z', [0.05, 0.55])} (Z+ up from table)
-
 ═══════════════════════════════════════════════════════════
 CAMERA SETUP
 ═══════════════════════════════════════════════════════════
 
-You will receive 2 camera images with each request IN THIS EXACT ORDER:
-
-IMAGE 1 (FIRST IMAGE) - GRIPPER CAMERA:
-- Location: Mounted on robot end-effector (gripper base)
-- Field of View: 70° FOV
-- Orientation: Looking down from gripper at ~155° angle
-- Purpose: VERIFY GRASPS - Check if objects are IN the gripper
-
-IMAGE 2 (SECOND IMAGE) - OVERHEAD CAMERA:
-- Location: Bird's-eye view above workspace at [0, -0.3, 1.0]
-- Field of View: 60° FOV
-- Orientation: Looking down at entire workspace
-- Purpose: SPATIAL REASONING - Localize objects, plan trajectories
+{_build_camera_descriptions(camera_names or [])}
 
 {build_tool_definitions(list(arm_controllers.keys()))}
 
@@ -1260,18 +1261,6 @@ async def handle_initial(data: dict, request_start_time: float) -> web.Response:
         'gripper_fingers': 0.025
     }
 
-    # Get robot model from arm_controllers for workspace limits
-    robot_model_instance = None
-    if arm_controllers:
-        first_arm = list(arm_controllers.values())[0]
-        robot_model_instance = first_arm.get('model')
-
-    workspace_bounds = robot_model_instance.workspace_limits if robot_model_instance else {
-        'x': (0.15, 0.50),
-        'y': (-0.30, 0.30),
-        'z': (0.05, 0.40)
-    }
-
     robot_base = [0, 0, 0]
 
     # Get current joint angles (in radians from actual robot)
@@ -1337,11 +1326,6 @@ CURRENT ROBOT STATE
 CURRENT JOINTS (degrees): {current_joints_deg}
 END-EFFECTOR POSITION: {ee_pos_str} meters (relative to robot base)
 GRIPPER STATE: {gripper_state_str} (position: {gripper_pos:.3f}m)
-
-WORKSPACE BOUNDS (relative to robot base, in meters):
-- X: {workspace_bounds.get('x', [0.1, 0.6])} (X+ forward, X- backward)
-- Y: {workspace_bounds.get('y', [-0.3, 0.3])} (Y+ left, Y- right)
-- Z: {workspace_bounds.get('z', [0.05, 0.55])} (Z+ up from table)
 
 ═══════════════════════════════════════════════════════════
 CAMERA SETUP

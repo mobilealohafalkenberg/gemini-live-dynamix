@@ -29,13 +29,8 @@ from models.vx300s_model import VX300S
 # Modern Robotics for IK/FK
 import modern_robotics as mr
 
-# Import safety validator
-try:
-    from controllers.safety_validator import SafetyValidator, RiskLevel
-    SAFETY_ENABLED = True
-except ImportError:
-    print("[ArmController] Warning: Safety validator not available")
-    SAFETY_ENABLED = False
+# Safety validation now done via check_safety_constraints() method
+# (only checks wrist rotation to prevent cable wrap)
 
 
 class ArmState(Enum):
@@ -70,48 +65,19 @@ class ArmController:
     - Safe workspace limits
     """
     
-    # Standard poses (in radians)
+    # Standard poses (in radians) - must match config/vx300s.yaml
     POSES = {
-        'home': [0.0, -0.3, 0.6, 0.0, -0.3, 0.0],  # More centered, moderate position
-        'sleep': [0.0, -1.85, 1.55, 0.0, -1.57, 0.0],
-        'ready': [0.0, -0.96, 1.16, 0.0, -0.3, 0.0],  # START_ARM_POSE[:6]
+        'home': [0.0, -0.3, 0.6, 0.0, -0.3, 0.0],
+        'sleep': [0.0, -1.69, 1.55, 0.0, 0.8, 0.0],
+        'ready': [0.0, -0.96, 1.16, 0.0, -0.3, 0.0],
     }
     
-    # Workspace limits (meters) - matches VX300S model
-    WORKSPACE = {
-        'x': (0.15, 0.50),   # Forward reach only - cannot reach behind base
-        'y': (-0.30, 0.30),  # Left-right reach
-        'z': (0.05, 0.40),   # Vertical reach above table
-    }
-    
-    # Safety constraints to prevent self-collision
+    # Safety: Only limit wrist rotation to prevent continuous spinning (cable wrap)
+    # All other limits (workspace, joint) are enforced by Dynamixel firmware
     SAFETY_CONSTRAINTS = {
-        # Absolute maximum wrist rotation limit (prevents cable/camera damage)
-        'max_safe_wrist_rotation': math.radians(120),  # Absolute maximum safe rotation ±120°
-
-        # If end effector is close to base (x < threshold), limit wrist rotation
-        'close_to_base_x_threshold': 0.15,  # meters
-        'close_to_base_y_threshold': 0.10,  # meters
-        'wrist_rotate_limit_when_close': math.radians(30),  # Max ±30° when close to base
-
-        # Dangerous joint combinations to avoid
-        'min_shoulder_angle': math.radians(-110),  # Don't fold too far back
-        'max_elbow_angle': math.radians(100),      # Don't over-extend elbow
-
-        # When gripper is pointing down and close to base, restrict rotation
-        'wrist_angle_down_threshold': math.radians(-45),  # Wrist pointing down
-        'safe_distance_from_base': 0.25,  # meters - minimum safe distance for full rotation
-        'wrist_rotate_limit_when_down_at_base': math.radians(20),  # Very restricted when down near base
-
-        # Additional constraints for low z positions
-        'low_z_threshold': 0.15,  # meters - when gripper is low
-        'wrist_rotate_limit_when_low': math.radians(45),  # Max rotation when low
-        'wrist_rotate_limit_at_table_level': math.radians(60),  # Rotation limit at low position to prevent camera collision
-
-        # Dangerous combination thresholds
-        'dangerous_shoulder_back_threshold': math.radians(-90),  # Shoulder back threshold
-        'dangerous_elbow_extended_threshold': math.radians(80),  # Elbow extended threshold
-        'dangerous_wrist_rotation_threshold': math.radians(90),  # Wrist rotation in dangerous combo
+        # Maximum wrist rotation to prevent cable wrap from continuous spinning
+        # Hardware allows ±180°, but we track to prevent cumulative rotation
+        'max_wrist_rotation': math.radians(180),  # ±180° limit per move
     }
     
     def __init__(self, dynamixel_controller: Optional[DynamixelController] = None,
@@ -143,16 +109,6 @@ class ArmController:
         self.active_trajectories = {}  # trajectory_id -> trajectory info
         self.trajectory_lock = threading.Lock()
         self.cancel_flags = {}  # trajectory_id -> threading.Event for cancellation
-
-        # Initialize safety validator
-        self.safety_enabled = enable_safety and SAFETY_ENABLED
-        if self.safety_enabled:
-            self.safety_validator = SafetyValidator(safety_profile="strict")
-            print(f"[ArmController] Safety validator enabled (dry_run={dry_run})")
-        else:
-            self.safety_validator = None
-            if enable_safety and not SAFETY_ENABLED:
-                print("[ArmController] Safety requested but validator not available")
         
     def initialize(self) -> bool:
         """
@@ -277,93 +233,32 @@ class ArmController:
 
     def check_safety_constraints(self, joint_positions: List[float], ee_position: Optional[Dict] = None) -> Tuple[bool, str]:
         """
-        Check if joint positions are safe (no self-collision risk).
+        Check if joint positions are safe.
+
+        Only checks wrist rotation to prevent continuous spinning (cable wrap).
+        All other limits are enforced by Dynamixel firmware.
 
         Args:
             joint_positions: List of 6 joint angles in radians
-            ee_position: Optional end effector position dict with x, y, z
+            ee_position: Optional end effector position dict (unused, kept for API compatibility)
 
         Returns:
             (is_safe, warning_message)
         """
         if len(joint_positions) != 6:
             return True, ""  # Skip check if invalid input
-        
+
         waist, shoulder, elbow, forearm_roll, wrist_angle, wrist_rotate = joint_positions
-        
-        # Log for debugging
-        print(f"[Safety] Checking joints: wrist_rotate={math.degrees(wrist_rotate):.1f}°, "
-              f"wrist_angle={math.degrees(wrist_angle):.1f}°, shoulder={math.degrees(shoulder):.1f}°")
-        if ee_position:
-            print(f"[Safety] Position: x={ee_position.get('x', 0):.3f}, "
-                  f"y={ee_position.get('y', 0):.3f}, z={ee_position.get('z', 0):.3f}")
-        
-        # Check 1: Shoulder angle limit
-        if shoulder < self.SAFETY_CONSTRAINTS['min_shoulder_angle']:
-            return False, f"Shoulder angle too far back ({math.degrees(shoulder):.1f}°), risk of self-collision"
-        
-        # Check 2: Elbow over-extension
-        if elbow > self.SAFETY_CONSTRAINTS['max_elbow_angle']:
-            return False, f"Elbow over-extended ({math.degrees(elbow):.1f}°), risk of mechanical damage"
-        
-        # Check 3: Large wrist rotation is ALWAYS dangerous with this robot configuration
-        # The camera and cables can get damaged with large rotations
-        max_safe_rotation = self.SAFETY_CONSTRAINTS['max_safe_wrist_rotation']
-        if abs(wrist_rotate) > max_safe_rotation:
-            return False, (f"Wrist rotation ({math.degrees(wrist_rotate):.1f}°) exceeds safe limit. "
-                         f"Max allowed: ±{math.degrees(max_safe_rotation):.1f}°")
-        
-        # Check 4: Position-based constraints
-        if ee_position:
-            x = ee_position.get('x', 0.5)
-            y = ee_position.get('y', 0.5)
-            z = ee_position.get('z', 0.5)
-            
-            # Calculate distance from base in XY plane
-            distance_from_base = math.sqrt(x**2 + y**2)
-            
-            # Check 4a: If close to base in XY, restrict wrist rotation
-            if distance_from_base < self.SAFETY_CONSTRAINTS['safe_distance_from_base']:
-                max_rotation = self.SAFETY_CONSTRAINTS['wrist_rotate_limit_when_close']
-                if abs(wrist_rotate) > max_rotation:
-                    return False, (f"Wrist rotation ({math.degrees(wrist_rotate):.1f}°) too large "
-                                 f"when close to base (distance: {distance_from_base:.2f}m). "
-                                 f"Max allowed: ±{math.degrees(max_rotation):.1f}°")
-            
-            # Check 4b: If low to table (small z), restrict wrist rotation
-            if z <= self.SAFETY_CONSTRAINTS['low_z_threshold']:
-                max_rotation = self.SAFETY_CONSTRAINTS['wrist_rotate_limit_when_low']
-                if abs(wrist_rotate) > max_rotation:
-                    return False, (f"Wrist rotation ({math.degrees(wrist_rotate):.1f}°) too large "
-                                 f"when low to table (z={z:.2f}m). "
-                                 f"Max allowed: ±{math.degrees(max_rotation):.1f}°")
-            
-            # Check 4c: Wrist pointing down and close to base
-            if (wrist_angle < self.SAFETY_CONSTRAINTS['wrist_angle_down_threshold'] and
-                distance_from_base < self.SAFETY_CONSTRAINTS['safe_distance_from_base']):
-                # Extra strict on rotation when pointing down near base
-                max_rotation = self.SAFETY_CONSTRAINTS['wrist_rotate_limit_when_down_at_base']
-                if abs(wrist_rotate) > max_rotation:
-                    return False, (f"Wrist rotation restricted when pointing down "
-                                 f"({math.degrees(wrist_angle):.1f}°) near base. "
-                                 f"Max allowed: ±{math.degrees(max_rotation):.1f}°. "
-                                 f"Risk of cable/camera damage")
-        
-        # Check 5: Dangerous combination - shoulder back + elbow extended + wrist rotated
-        if (shoulder < self.SAFETY_CONSTRAINTS['dangerous_shoulder_back_threshold'] and
-            elbow > self.SAFETY_CONSTRAINTS['dangerous_elbow_extended_threshold'] and
-            abs(wrist_rotate) > self.SAFETY_CONSTRAINTS['dangerous_wrist_rotation_threshold']):
-            return False, "Dangerous joint combination: shoulder back + elbow extended + wrist rotated"
-        
-        # Check 6: Specific dangerous configuration when reaching forward at table level
-        # This is the configuration that was hitting the camera
-        max_rotation_at_table = self.SAFETY_CONSTRAINTS['wrist_rotate_limit_at_table_level']
-        if (ee_position and ee_position.get('z', 1.0) <= self.SAFETY_CONSTRAINTS['low_z_threshold'] and
-            abs(wrist_rotate) > max_rotation_at_table):
-            return False, (f"Wrist rotation ({math.degrees(wrist_rotate):.1f}°) restricted "
-                         f"at low position (z={ee_position.get('z', 0):.2f}m). "
-                         f"Max allowed: ±{math.degrees(max_rotation_at_table):.1f}° to prevent camera collision")
-        
+
+        # Only check: Wrist rotation ±180° to prevent cable wrap from continuous spinning
+        max_rotation = self.SAFETY_CONSTRAINTS['max_wrist_rotation']
+        if abs(forearm_roll) > max_rotation:
+            return False, (f"Forearm roll ({math.degrees(forearm_roll):.1f}°) exceeds ±180° limit. "
+                         f"Risk of cable wrap.")
+        if abs(wrist_rotate) > max_rotation:
+            return False, (f"Wrist rotation ({math.degrees(wrist_rotate):.1f}°) exceeds ±180° limit. "
+                         f"Risk of cable wrap.")
+
         return True, ""
     
     def parse_joint_angles(self, angles: List[float], unit: str = 'auto') -> List[float]:
@@ -439,13 +334,7 @@ class ArmController:
                 raise ValueError(f"Position must have 2 or 3 elements, got {len(position)}")
         else:
             raise ValueError(f"Position must be list or dict, got {type(position)}")
-        
-        # Validate workspace limits
-        for axis, (min_val, max_val) in self.WORKSPACE.items():
-            if result[axis] < min_val or result[axis] > max_val:
-                print(f"[ArmController] Warning: {axis}={result[axis]:.3f} outside workspace [{min_val}, {max_val}]")
-                result[axis] = max(min_val, min(max_val, result[axis]))
-        
+
         return result
 
     def _convert_waypoint_to_position(self, point: List[float]) -> List[float]:
@@ -540,6 +429,9 @@ class ArmController:
 
             print(f"[ArmController] Moving to joints: {[f'{a:.3f}' for a in angles_rad]}")
 
+            # Set slower profile velocity for smoother movement
+            self.dxl.set_profile_velocity(50)
+
             # Use DynamixelController to set joint positions
             self.dxl.set_joint_positions_radians(np.array(angles_rad))
 
@@ -588,34 +480,17 @@ class ArmController:
         try:
             # Parse position
             pos = self.parse_position(position, format)
-            
-            # Safety validation
-            if self.safety_enabled and self.safety_validator:
-                validation = self.safety_validator.validate_position(pos['x'], pos['y'], pos['z'])
-                if not validation.valid:
-                    print(f"[ArmController] ⚠️ SAFETY: {validation.message}")
-                    return {
-                        "success": False,
-                        "error": validation.message,
-                        "state": "blocked",
-                        "safety": validation.to_dict()
-                    }
-                elif validation.risk_level == RiskLevel.NEEDS_CONFIRMATION:
-                    print(f"[ArmController] ⚠️ SAFETY WARNING: {validation.message}")
-                    # In production, you might want to require confirmation here
-                    # For now, we'll log but continue
-                
-                # If dry run mode, don't execute actual movement
-                if self.dry_run:
-                    print(f"[ArmController] DRY RUN: Would move to x={pos['x']:.3f}, y={pos['y']:.3f}, z={pos['z']:.3f}")
-                    return {
-                        "success": True,
-                        "state": "dry_run",
-                        "target_position": pos,
-                        "safety": validation.to_dict(),
-                        "message": "Dry run - movement validated but not executed"
-                    }
-            
+
+            # If dry run mode, don't execute actual movement
+            if self.dry_run:
+                print(f"[ArmController] DRY RUN: Would move to x={pos['x']:.3f}, y={pos['y']:.3f}, z={pos['z']:.3f}")
+                return {
+                    "success": True,
+                    "state": "dry_run",
+                    "target_position": pos,
+                    "message": "Dry run - movement not executed"
+                }
+
             # Default orientation if not provided
             if orientation is None:
                 # Calculate yaw to face the target
@@ -651,7 +526,12 @@ class ArmController:
             if not success:
                 with self.state_lock:
                     self.current_state = ArmState.ERROR
-                return {"success": False, "error": "IK solution not found", "state": "error"}
+                return {
+                    "success": False,
+                    "error": f"IK solution not found - position [{pos['x']:.3f}, {pos['y']:.3f}, {pos['z']:.3f}] may be out of reach",
+                    "state": "error",
+                    "target_position": pos
+                }
 
             # Convert to list
             joint_list = list(joint_solution)
@@ -770,17 +650,8 @@ class ArmController:
 
         print(f"[ArmController] Starting opening ceremony (moving to ready in {moving_time}s)")
 
-        # Set slow profile velocity for smooth ceremony movement
-        # Value 40 is very slow compared to default 131
-        self.dxl.set_profile_velocity(40)
-        self.dxl.set_profile_acceleration(50)
-
-        # Move slowly to ready position
+        # Move slowly to ready position (velocity 50 is set in move_joints)
         result = self.move_to_pose('ready', moving_time=moving_time, blocking=blocking)
-
-        # Restore normal profile velocity for regular operations
-        self.dxl.set_profile_velocity(131)
-        self.dxl.set_profile_acceleration(0)  # 0 = use default/immediate
 
         if result.get('success'):
             print("[ArmController] Opening ceremony complete - arm is ready")
@@ -808,17 +679,8 @@ class ArmController:
 
         print(f"[ArmController] Starting closing ceremony (moving to sleep in {moving_time}s)")
 
-        # Set slow profile velocity for smooth ceremony movement
-        # Value 40 is very slow compared to default 131
-        self.dxl.set_profile_velocity(40)
-        self.dxl.set_profile_acceleration(50)
-
-        # Move slowly to sleep position
+        # Move slowly to sleep position (velocity 50 is set in move_joints)
         result = self.move_to_pose('sleep', moving_time=moving_time, blocking=blocking)
-
-        # Restore normal profile velocity for regular operations
-        self.dxl.set_profile_velocity(131)
-        self.dxl.set_profile_acceleration(0)  # 0 = use default/immediate
 
         if result.get('success'):
             print("[ArmController] Closing ceremony complete - arm is in sleep position")
@@ -909,27 +771,6 @@ class ArmController:
         if not blocking:
             trajectory_id = str(uuid.uuid4())
 
-            # Pre-validate all waypoints if safety is enabled
-            if self.safety_enabled and self.safety_validator:
-                print(f"[ArmController] Pre-validating {len(waypoints)} waypoints for safety...")
-                for i, waypoint in enumerate(waypoints):
-                    point = waypoint.get('point', [])
-                    label = waypoint.get('label', f'waypoint_{i}')
-
-                    # Convert point format if needed
-                    position = self._convert_waypoint_to_position(point)
-
-                    if len(position) >= 3:
-                        validation = self.safety_validator.validate_position(position[0], position[1], position[2])
-                        if not validation.valid:
-                            print(f"[ArmController] ⚠️ SAFETY: Waypoint '{label}' blocked: {validation.message}")
-                            return {
-                                "success": False,
-                                "error": f"Waypoint '{label}' failed safety check: {validation.message}",
-                                "waypoint_index": i,
-                                "safety": validation.to_dict()
-                            }
-
             # Initialize trajectory tracking
             with self.trajectory_lock:
                 self.active_trajectories[trajectory_id] = {
@@ -971,27 +812,6 @@ class ArmController:
         # Map speed to moving_time
         speed_map = {'slow': 2.5, 'medium': 1.5, 'fast': 0.8}
         moving_time = speed_map.get(speed, 1.5)
-
-        # Pre-validate all waypoints if safety is enabled
-        if self.safety_enabled and self.safety_validator:
-            print(f"[ArmController] Pre-validating {len(waypoints)} waypoints for safety...")
-            for i, waypoint in enumerate(waypoints):
-                point = waypoint.get('point', [])
-                label = waypoint.get('label', f'waypoint_{i}')
-
-                # Convert point format if needed
-                position = self._convert_waypoint_to_position(point)
-
-                if len(position) >= 3:
-                    validation = self.safety_validator.validate_position(position[0], position[1], position[2])
-                    if not validation.valid:
-                        print(f"[ArmController] ⚠️ SAFETY: Waypoint '{label}' blocked: {validation.message}")
-                        return {
-                            "success": False,
-                            "error": f"Waypoint '{label}' failed safety check: {validation.message}",
-                            "waypoint_index": i,
-                            "safety": validation.to_dict()
-                        }
 
         waypoint_results = []
         overall_success = True
@@ -1390,9 +1210,9 @@ class ArmController:
 
         try:
             print("[ArmController] ⚠️ EMERGENCY STOP ACTIVATED!")
-            # Disable torque on arm motors
-            arm_motor_ids = [1, 2, 4, 6, 7, 8]
-            self.dxl.disable_torque(arm_motor_ids)
+            # Disable torque on ALL motors (arm + shadow + gripper)
+            ALL_MOTOR_IDS = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+            self.dxl.disable_torque(ALL_MOTOR_IDS)
             with self.state_lock:
                 self.current_state = ArmState.ERROR
             print("[ArmController] System in ERROR state. Call resume_after_stop() to recover.")

@@ -14,8 +14,7 @@ class VX300S:
     This model defines:
     - Slist: Screw axes in space frame (6x6 matrix)
     - M: Home configuration matrix (4x4 transformation)
-    - Joint limits for all 6 joints
-    - Workspace bounds
+    - Joint limits for all 6 joints (reference only - hardware enforces)
     """
 
     # =========================================================================
@@ -56,16 +55,6 @@ class VX300S:
         (-1.74, 2.23),             # Joint 5: Wrist angle
         (-np.pi, np.pi)            # Joint 6: Wrist rotate (full rotation)
     ]
-
-    # =========================================================================
-    # Workspace Limits (meters)
-    # =========================================================================
-
-    workspace_limits = {
-        'x': (0.15, 0.50),   # Forward reach
-        'y': (-0.30, 0.30),  # Left-right reach
-        'z': (0.05, 0.40)    # Vertical reach (above table)
-    }
 
     # =========================================================================
     # Physical Parameters
@@ -143,30 +132,6 @@ class VX300S:
         return True, ""
 
     @classmethod
-    def validate_workspace_position(cls, x: float, y: float, z: float) -> tuple[bool, str]:
-        """
-        Validate if end-effector position is within workspace.
-
-        Args:
-            x, y, z: End-effector position in meters
-
-        Returns:
-            Tuple of (is_valid, error_message)
-        """
-        limits = cls.workspace_limits
-
-        if x < limits['x'][0] or x > limits['x'][1]:
-            return False, f"X={x:.3f}m outside workspace [{limits['x'][0]}, {limits['x'][1]}]"
-
-        if y < limits['y'][0] or y > limits['y'][1]:
-            return False, f"Y={y:.3f}m outside workspace [{limits['y'][0]}, {limits['y'][1]}]"
-
-        if z < limits['z'][0] or z > limits['z'][1]:
-            return False, f"Z={z:.3f}m outside workspace [{limits['z'][0]}, {limits['z'][1]}]"
-
-        return True, ""
-
-    @classmethod
     def get_info(cls) -> dict:
         """
         Get robot model information.
@@ -180,7 +145,6 @@ class VX300S:
             'dof': 6,
             'joint_limits_deg': [[np.degrees(l[0]), np.degrees(l[1])]
                                  for l in cls.joint_limits],
-            'workspace_limits': cls.workspace_limits,
             'link_lengths': cls.link_lengths,
             'total_reach': sum(cls.link_lengths.values()),
             'dynamixel_motors': {
@@ -206,10 +170,6 @@ if __name__ == "__main__":
     joint_names = ['Waist', 'Shoulder', 'Elbow', 'Forearm Roll', 'Wrist Angle', 'Wrist Rotate']
     for i, (name, limits) in enumerate(zip(joint_names, info['joint_limits_deg'])):
         print(f"  Joint {i+1} ({name}): [{limits[0]:.1f}°, {limits[1]:.1f}°]")
-
-    print("\nWorkspace Limits (meters):")
-    for axis, limits in info['workspace_limits'].items():
-        print(f"  {axis.upper()}: [{limits[0]:.3f}, {limits[1]:.3f}]")
 
     print(f"\nTotal Reach: ~{info['total_reach']:.3f}m")
 
@@ -242,13 +202,5 @@ if __name__ == "__main__":
     test_joints = np.array([0.0, -0.3, 0.6, 0.0, -0.3, 0.0])
     valid, msg = robot.validate_joint_angles(test_joints)
     print(f"  Home pose valid: {valid}")
-
-    valid, msg = robot.validate_workspace_position(0.3, 0.0, 0.2)
-    print(f"  Position (0.3, 0.0, 0.2) valid: {valid}")
-
-    valid, msg = robot.validate_workspace_position(1.0, 0.0, 0.2)
-    print(f"  Position (1.0, 0.0, 0.2) valid: {valid}")
-    if not valid:
-        print(f"    Error: {msg}")
 
     print("\n✓ Model loaded successfully")

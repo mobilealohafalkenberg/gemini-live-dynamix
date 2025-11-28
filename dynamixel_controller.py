@@ -608,8 +608,9 @@ class DynamixelController:
         # Stop monitoring
         self.stop_monitoring()
 
-        # Disable torque on all motors
-        self.disable_torque()
+        # Disable torque on ALL motors (1-8 arm + 9 gripper)
+        ALL_MOTOR_IDS = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+        self.disable_torque(ALL_MOTOR_IDS)
 
         # Close port
         if self.port_handler:
