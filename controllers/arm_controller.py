@@ -429,10 +429,9 @@ class ArmController:
 
             print(f"[ArmController] Moving to joints: {[f'{a:.3f}' for a in angles_rad]}")
 
-            # Set slower profile velocity for smoother movement
-            self.dxl.set_profile_velocity(50)
+            self.dxl.set_profile_velocity(40)
+            self.dxl.set_profile_acceleration(20)
 
-            # Use DynamixelController to set joint positions
             self.dxl.set_joint_positions_radians(np.array(angles_rad))
 
             # If blocking, wait for movement to complete
@@ -548,7 +547,9 @@ class ArmController:
 
             print(f"[ArmController] Safety check passed, executing movement")
 
-            # Execute the safe movement
+            self.dxl.set_profile_velocity(40)
+            self.dxl.set_profile_acceleration(20)
+
             self.dxl.set_joint_positions_radians(np.array(joint_list))
 
             # If blocking, wait for movement to complete

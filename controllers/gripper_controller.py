@@ -276,15 +276,34 @@ class GripperController:
         else:
             # Hardware mode: Execute real movement
             dynamixel_pos = self._radians_to_dynamixel(FOLLOWER_GRIPPER_JOINT_OPEN)
+            print(f"[GripperController] Commanding motor {self.gripper_motor_id} to position {dynamixel_pos} (target: {FOLLOWER_GRIPPER_JOINT_OPEN:.3f} rad)")
             self.dxl.sync_write_positions({self.gripper_motor_id: dynamixel_pos})
 
             if blocking:
-                time.sleep(1.0)
-                with self.state_lock:
-                    self.current_state = GripperState.OPEN
+                # Wait for actual position to reach open threshold (max 3 seconds)
+                timeout = 3.0
+                start_time = time.time()
+                last_pos = None
+                while time.time() - start_time < timeout:
+                    current_pos = self.dxl.get_cached_gripper_position()
+                    if current_pos is not None:
+                        position = self._dynamixel_to_radians(current_pos)
+                        if last_pos != current_pos:
+                            print(f"[GripperController] Current position: {current_pos} ({position:.3f} rad), threshold: {self.OPEN_THRESHOLD:.3f} rad")
+                            last_pos = current_pos
+                        if position >= self.OPEN_THRESHOLD:
+                            with self.state_lock:
+                                self.current_state = GripperState.OPEN
+                            print(f"[GripperController] Gripper reached open threshold")
+                            break
+                    time.sleep(0.1)
+                else:
+                    # Timeout: gripper didn't reach open position
+                    final_pos = self.dxl.get_cached_gripper_position()
+                    print(f"[GripperController] WARNING: Gripper open timed out. Final position: {final_pos}")
 
         return self.get_gripper_state()
-    
+
     def close_gripper(self, blocking: bool = True, verify_grasp: bool = False) -> Dict:
         """
         Close the gripper with optional grasp verification.
@@ -320,12 +339,31 @@ class GripperController:
         else:
             # Hardware mode: Execute real movement
             dynamixel_pos = self._radians_to_dynamixel(FOLLOWER_GRIPPER_JOINT_CLOSE)
+            print(f"[GripperController] Commanding motor {self.gripper_motor_id} to position {dynamixel_pos} (target: {FOLLOWER_GRIPPER_JOINT_CLOSE:.3f} rad)")
             self.dxl.sync_write_positions({self.gripper_motor_id: dynamixel_pos})
 
             if blocking:
-                time.sleep(1.0)
-                with self.state_lock:
-                    self.current_state = GripperState.CLOSED
+                # Wait for actual position to reach closed threshold (max 3 seconds)
+                timeout = 3.0
+                start_time = time.time()
+                last_pos = None
+                while time.time() - start_time < timeout:
+                    current_pos = self.dxl.get_cached_gripper_position()
+                    if current_pos is not None:
+                        position = self._dynamixel_to_radians(current_pos)
+                        if last_pos != current_pos:
+                            print(f"[GripperController] Current position: {current_pos} ({position:.3f} rad), threshold: {self.CLOSE_THRESHOLD:.3f} rad")
+                            last_pos = current_pos
+                        if position <= self.CLOSE_THRESHOLD:
+                            with self.state_lock:
+                                self.current_state = GripperState.CLOSED
+                            print(f"[GripperController] Gripper reached closed threshold")
+                            break
+                    time.sleep(0.1)
+                else:
+                    # Timeout: gripper didn't reach closed position
+                    final_pos = self.dxl.get_cached_gripper_position()
+                    print(f"[GripperController] WARNING: Gripper close timed out. Final position: {final_pos}")
 
         result = self.get_gripper_state()
         # Verify grasp if requested

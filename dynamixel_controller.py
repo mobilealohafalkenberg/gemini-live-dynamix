@@ -174,6 +174,9 @@ class DynamixelController:
 
             print("[DynamixelController] ✓ Motor initialization complete")
 
+            self.set_profile_velocity(40)
+            self.set_profile_acceleration(20)
+
             # Read initial positions
             self.sync_read_positions()
 

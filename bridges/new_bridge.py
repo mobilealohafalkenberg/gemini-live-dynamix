@@ -224,92 +224,176 @@ def shutdown_hardware():
 def capture_encoded_images() -> Dict[str, str]:
     """Captures images and returns Dict[camera_name, base64_string]"""
     if not camera_controller or not camera_controller.initialized:
-        # Return mock if no camera for testing
-        return {"mock_cam": "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"}
+        return {}
     return camera_controller.get_all_frames_base64()
 
 
 # --- TOOLS DEFINITIONS ---
-# Native Python functions that the SDK will convert to Schemas
+# SDK-native FunctionDeclarations with proper Schema definitions
 
-def move_arm(arm_id: str, position: List[float], moving_time: float = 1.5) -> Dict[str, Any]:
+def build_tool_declarations(connected_arms: List[str]) -> types.Tool:
     """
-    Moves the robot arm end-effector to a specific 3D Cartesian coordinate.
-    
-    Args:
-        arm_id: The ID of the arm (e.g., 'follower_right').
-        position: Target [x, y, z] coordinates in meters.
-        moving_time: Duration of movement in seconds.
+    Build SDK-native tool declarations with proper Schema definitions.
+
+    Uses types.FunctionDeclaration which the SDK converts to the
+    correct API format automatically.
     """
+    arm_enum_desc = f"Arm ID. Must be one of: {', '.join(connected_arms)}"
+
+    return types.Tool(
+        function_declarations=[
+            # move_arm - Cartesian position control
+            types.FunctionDeclaration(
+                name="move_arm",
+                description="Move robot arm end-effector to a 3D Cartesian position. Use this for precise positioning.",
+                parameters=types.Schema(
+                    type=types.Type.OBJECT,
+                    properties={
+                        "arm_id": types.Schema(
+                            type=types.Type.STRING,
+                            description=arm_enum_desc
+                        ),
+                        "position": types.Schema(
+                            type=types.Type.ARRAY,
+                            items=types.Schema(type=types.Type.NUMBER),
+                            description="Target [x, y, z] position in meters. Robot base is origin. +X=forward, +Y=left, +Z=up."
+                        ),
+                        "moving_time": types.Schema(
+                            type=types.Type.NUMBER,
+                            description="Movement duration in seconds (default: 1.5)"
+                        )
+                    },
+                    required=["arm_id", "position"]
+                )
+            ),
+
+            # control_gripper - Gripper open/close
+            types.FunctionDeclaration(
+                name="control_gripper",
+                description="Open or close the robot gripper.",
+                parameters=types.Schema(
+                    type=types.Type.OBJECT,
+                    properties={
+                        "arm_id": types.Schema(
+                            type=types.Type.STRING,
+                            description=arm_enum_desc
+                        ),
+                        "action": types.Schema(
+                            type=types.Type.STRING,
+                            description="Gripper action: 'open' or 'close'"
+                        )
+                    },
+                    required=["arm_id", "action"]
+                )
+            ),
+
+            # finish_task - Signal completion
+            types.FunctionDeclaration(
+                name="finish_task",
+                description="Call this when the task is complete or impossible to continue.",
+                parameters=types.Schema(
+                    type=types.Type.OBJECT,
+                    properties={
+                        "success": types.Schema(
+                            type=types.Type.BOOLEAN,
+                            description="Whether the task was completed successfully"
+                        ),
+                        "summary": types.Schema(
+                            type=types.Type.STRING,
+                            description="Brief summary of what was accomplished or why task failed"
+                        )
+                    },
+                    required=["success", "summary"]
+                )
+            )
+        ]
+    )
+
+
+# --- TOOL EXECUTION FUNCTIONS ---
+
+def execute_move_arm(arm_id: str, position: List[float], moving_time: float = 1.5) -> Dict[str, Any]:
+    """Execute move_arm tool."""
     print(f"[Robot] Moving {arm_id} to {position}")
-    if not ROBOT_HARDWARE_AVAILABLE:
-        return {"status": "success", "simulated": True, "new_position": position}
+
+    if arm_id not in arm_controllers:
+        return {"status": "error", "error": f"Arm '{arm_id}' not found. Available: {list(arm_controllers.keys())}"}
 
     try:
         arm = arm_controllers[arm_id]['arm']
-        # Blocking call to ensure movement completes before we return
-        arm.move_to_position(position, moving_time=moving_time, blocking=True)
-        state = arm.get_arm_state()
-        return {
-            "status": "success", 
-            "final_position": state['end_effector_position'],
-            "message": "Movement complete. Analyze the accompanying image to verify alignment."
-        }
+        result = arm.move_to_position(position, moving_time=moving_time, blocking=True)
+        if result.get('success'):
+            state = arm.get_arm_state()
+            return {
+                "status": "success",
+                "final_position": state.get('end_effector_position', {}),
+                "message": "Movement complete. Verify alignment in camera images."
+            }
+        else:
+            return {"status": "error", "error": result.get('error', 'Move failed')}
     except Exception as e:
         return {"status": "error", "error": str(e)}
 
-def control_gripper(arm_id: str, action: str) -> Dict[str, Any]:
-    """
-    Opens or closes the robot gripper.
-    
-    Args:
-        arm_id: The ID of the arm.
-        action: 'open' or 'close'.
-    """
+
+def execute_control_gripper(arm_id: str, action: str) -> Dict[str, Any]:
+    """Execute control_gripper tool."""
     print(f"[Robot] Gripper {arm_id} -> {action}")
-    if not ROBOT_HARDWARE_AVAILABLE:
-        return {"status": "success", "simulated": True, "action": action}
+
+    if arm_id not in arm_controllers:
+        return {"status": "error", "error": f"Arm '{arm_id}' not found. Available: {list(arm_controllers.keys())}"}
 
     try:
         gripper = arm_controllers[arm_id]['gripper']
-        if action == 'open': gripper.open_gripper()
-        elif action == 'close': gripper.close_gripper()
-        return {"status": "success", "action": action, "message": "Gripper actuated."}
+        if action == 'open':
+            result = gripper.open_gripper()
+        elif action == 'close':
+            result = gripper.close_gripper()
+        else:
+            return {"status": "error", "error": f"Invalid action '{action}'. Use 'open' or 'close'."}
+
+        # Return actual result from gripper operation
+        if result.get('success'):
+            return {
+                "status": "success",
+                "action": action,
+                "state": result.get('state'),
+                "position": result.get('position'),
+                "position_normalized": result.get('position_normalized'),
+                "message": f"Gripper {action}ed successfully."
+            }
+        else:
+            return {
+                "status": "error",
+                "action": action,
+                "error": result.get('error', f'Gripper {action} failed')
+            }
     except Exception as e:
         return {"status": "error", "error": str(e)}
 
-def finish_task(success: bool, summary: str):
-    """Call this when the task is fully complete or if it is impossible."""
-    return {"status": "task_ended", "success": success, "summary": summary}
 
-# Tool list for the model
-ROBOT_TOOLS = [move_arm, control_gripper, finish_task]
+def execute_finish_task(success: bool, summary: str) -> Dict[str, Any]:
+    """Execute finish_task tool."""
+    return {"status": "task_ended", "success": success, "summary": summary}
 
 
 def build_system_instruction(connected_arms: List[str]) -> str:
     """Build lean system instruction - SDK provides tool docs via schemas."""
-    arm_list = ', '.join(f'"{a}"' for a in connected_arms) if connected_arms else '"mock_arm"'
-    first_arm = connected_arms[0] if connected_arms else 'mock_arm'
+    arm_list = ', '.join(connected_arms)
 
-    return f"""You are a robotic manipulation agent controlling a ViperX 300s 6-DOF arm.
+    return f"""You are a robotic manipulation agent controlling ViperX 300s 6-DOF arm(s).
 
-CONNECTED ARMS: [{arm_list}]
-USE arm_id="{first_arm}" for all function calls.
+AVAILABLE ARMS: {arm_list}
+Use the appropriate arm_id from the available arms for all function calls.
 
-COORDINATE SYSTEM:
-- Robot base at origin [0, 0, 0]
-- +X: Forward, 
-- +Y: Left,
-- -Y: Right,
-- +Z: Up (meters)
+COORDINATE SYSTEM (meters, relative to robot base):
++X: Forward | +Y: Left | -Y: Right | +Z: Up
 
 EXECUTION PROTOCOL:
-After EVERY action, you receive NEW camera images.
-- Verify success visually before next action
-- If grasp missed, adjust and retry
-- Call finish_task when done or impossible
+1. After EVERY action, examine NEW camera images to verify result
+2. If action failed or missed, adjust and retry
+3. Call finish_task when complete or impossible
 
-Be precise and methodical."""
+Be precise. Small adjustments (1-2cm) often needed."""
 
 
 # --- GEMINI SESSION MANAGER ---
@@ -334,19 +418,17 @@ class RobotSession:
         # Explicit conversation history (not SDK-managed)
         self.history: List[types.Content] = []
 
-        # Build dynamic system instruction
+        # Build dynamic system instruction and tools
         connected_arms = list(arm_controllers.keys())
         self.system_instruction = build_system_instruction(connected_arms)
+        self.tools = build_tool_declarations(connected_arms)
 
         # Config for all API calls - with SDK native tool calling
         self.config = types.GenerateContentConfig(
             system_instruction=self.system_instruction,
-            tools=ROBOT_TOOLS,  # Pass tool functions to SDK
-            automatic_function_calling=types.AutomaticFunctionCallingConfig(
-                disable=True  # Manual control for image injection between steps
-            ),
+            tools=[self.tools],  # Pass Tool object with FunctionDeclarations
             temperature=0.1,
-            thinking_config=types.ThinkingConfig(thinking_budget=0)  # ER model works best with 0
+            thinking_config=types.ThinkingConfig(thinking_budget=-1)  # -1 for unlimited thinking
         )
 
     async def start(self):
@@ -517,19 +599,19 @@ class RobotSession:
         try:
             if name == "move_arm":
                 return await asyncio.to_thread(
-                    move_arm,
+                    execute_move_arm,
                     args.get('arm_id'),
                     args.get('position'),
                     args.get('moving_time', 1.5)
                 )
             elif name == "control_gripper":
                 return await asyncio.to_thread(
-                    control_gripper,
+                    execute_control_gripper,
                     args.get('arm_id'),
                     args.get('action')
                 )
             elif name == "finish_task":
-                return finish_task(args.get('success'), args.get('summary'))
+                return execute_finish_task(args.get('success', False), args.get('summary', ''))
             else:
                 return {"status": "error", "error": f"Unknown tool: {name}"}
         except Exception as e:
@@ -584,10 +666,18 @@ async def handle_ws_robot_connect(ws: web.WebSocketResponse):
                 return
 
             # Open gripper
-            await asyncio.get_event_loop().run_in_executor(
+            print(f"  [{arm_id}] Opening gripper...")
+            gripper_result = await asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda gc=gripper_ctrl: gc.open_gripper()
             )
+
+            if not gripper_result.get('success'):
+                await send_ws(ws, 'error', {
+                    'code': 'GRIPPER_FAILED',
+                    'message': f'{arm_id}: {gripper_result.get("error", "Gripper open failed")}'
+                })
+                return
 
         robot_connected = True
 
@@ -625,10 +715,15 @@ async def handle_ws_robot_disconnect(ws: web.WebSocketResponse):
             gripper_ctrl = arm_stack['gripper']
 
             # Close gripper first
-            await asyncio.get_event_loop().run_in_executor(
+            print(f"  [{arm_id}] Closing gripper...")
+            gripper_result = await asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda gc=gripper_ctrl: gc.close_gripper()
             )
+
+            if not gripper_result.get('success'):
+                logging.warning(f"{arm_id}: Gripper close failed - {gripper_result.get('error', 'unknown')}")
+                # Continue with shutdown anyway
 
             print(f"  [{arm_id}] Moving to sleep position...")
             await asyncio.get_event_loop().run_in_executor(
@@ -754,20 +849,42 @@ async def on_shutdown(app):
 
 
 if __name__ == '__main__':
+    import argparse
+
+    parser = argparse.ArgumentParser(description='Gemini Robotics ER Bridge')
+    parser.add_argument('--port', type=int, default=8082, help='Server port (default: 8082)')
+    parser.add_argument('--no-robot', action='store_true', help='Run without robot hardware (mock mode)')
+    args = parser.parse_args()
+
     print("\n" + "=" * 60)
-    print("  Gemini Robotics ER Bridge (Chat API)")
-    print("  WebSocket-only | Port 8082")
+    print("  Gemini Robotics ER Bridge")
+    print("  SDK Native Tool Calling | WebSocket API")
     print("=" * 60)
+    print()
+    print("Features:")
+    print("  - SDK native FunctionDeclaration tool definitions")
+    print("  - Proper types.Tool and types.Schema usage")
+    print("  - WebSocket real-time streaming")
+    print("  - Automatic image injection between steps")
+    print()
+
+    if not os.getenv('GEMINI_API_KEY'):
+        print("WARNING: GEMINI_API_KEY environment variable not set!")
+        print("Set it in .env or export GEMINI_API_KEY=your_key")
+        print()
 
     # Initialize hardware at startup
-    initialize_hardware()
+    if not args.no_robot:
+        initialize_hardware()
+    else:
+        print("[Bridge] Running in mock mode (--no-robot)")
 
     # Create and run app
     app = make_app()
     app.on_shutdown.append(on_shutdown)
 
-    print("\n[Bridge] Starting WebSocket server on port 8082...")
-    print("[Bridge] Connect via: ws://localhost:8082/ws")
+    print(f"\n[Bridge] Starting WebSocket server on port {args.port}...")
+    print(f"[Bridge] Connect via: ws://localhost:{args.port}/ws")
     print("[Bridge] Messages: task_request, robot_connect, robot_disconnect, status_request\n")
 
-    web.run_app(app, port=8082, print=None)
+    web.run_app(app, port=args.port, print=None)
