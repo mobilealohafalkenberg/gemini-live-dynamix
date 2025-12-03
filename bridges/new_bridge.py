@@ -153,9 +153,10 @@ def initialize_hardware() -> bool:
                 logging.error(f"Failed to initialize arm controller for {arm_id}")
                 continue
 
-            # Initialize GripperController
+            # Initialize GripperController with arm_id for per-arm calibration
             gripper_ctrl = GripperController(
                 dynamixel_controller=dxl_controller,
+                arm_id=arm_id,
                 dry_run=False
             )
 
@@ -267,10 +268,10 @@ def build_tool_declarations(connected_arms: List[str]) -> types.Tool:
                 )
             ),
 
-            # control_gripper - Gripper open/close
+            # control_gripper - Position-based gripper control
             types.FunctionDeclaration(
                 name="control_gripper",
-                description="Open or close the robot gripper.",
+                description="Control gripper position. Use 0.0 for fully closed, 1.0 for fully open, or intermediate values for partial grip.",
                 parameters=types.Schema(
                     type=types.Type.OBJECT,
                     properties={
@@ -278,12 +279,12 @@ def build_tool_declarations(connected_arms: List[str]) -> types.Tool:
                             type=types.Type.STRING,
                             description=arm_enum_desc
                         ),
-                        "action": types.Schema(
-                            type=types.Type.STRING,
-                            description="Gripper action: 'open' or 'close'"
+                        "position": types.Schema(
+                            type=types.Type.NUMBER,
+                            description="Gripper position: 0.0 (closed) to 1.0 (open). Use ~0.3 for holding small objects."
                         )
                     },
-                    required=["arm_id", "action"]
+                    required=["arm_id", "position"]
                 )
             ),
 
@@ -335,37 +336,40 @@ def execute_move_arm(arm_id: str, position: List[float], moving_time: float = 1.
         return {"status": "error", "error": str(e)}
 
 
-def execute_control_gripper(arm_id: str, action: str) -> Dict[str, Any]:
-    """Execute control_gripper tool."""
-    print(f"[Robot] Gripper {arm_id} -> {action}")
+def execute_control_gripper(arm_id: str, position: float) -> Dict[str, Any]:
+    """Execute control_gripper tool with position-based control.
+
+    Args:
+        arm_id: Which arm (follower_right, follower_left)
+        position: 0.0 (closed) to 1.0 (open)
+    """
+    print(f"[Robot] Gripper {arm_id} -> position {position:.2f}")
 
     if arm_id not in arm_controllers:
         return {"status": "error", "error": f"Arm '{arm_id}' not found. Available: {list(arm_controllers.keys())}"}
 
+    # Validate position range
+    if not 0.0 <= position <= 1.0:
+        return {"status": "error", "error": f"Position {position} out of range. Use 0.0 (closed) to 1.0 (open)."}
+
     try:
         gripper = arm_controllers[arm_id]['gripper']
-        if action == 'open':
-            result = gripper.open_gripper()
-        elif action == 'close':
-            result = gripper.close_gripper()
-        else:
-            return {"status": "error", "error": f"Invalid action '{action}'. Use 'open' or 'close'."}
+        result = gripper.set_gripper_position(position, blocking=True)
 
-        # Return actual result from gripper operation
         if result.get('success'):
             return {
                 "status": "success",
-                "action": action,
+                "target_position": position,
                 "state": result.get('state'),
                 "position": result.get('position'),
                 "position_normalized": result.get('position_normalized'),
-                "message": f"Gripper {action}ed successfully."
+                "message": f"Gripper moved to position {position:.2f}"
             }
         else:
             return {
                 "status": "error",
-                "action": action,
-                "error": result.get('error', f'Gripper {action} failed')
+                "target_position": position,
+                "error": result.get('error', 'Gripper position failed')
             }
     except Exception as e:
         return {"status": "error", "error": str(e)}
@@ -427,7 +431,7 @@ class RobotSession:
         self.config = types.GenerateContentConfig(
             system_instruction=self.system_instruction,
             tools=[self.tools],  # Pass Tool object with FunctionDeclarations
-            temperature=0.1,
+            temperature=0.5,
             thinking_config=types.ThinkingConfig(thinking_budget=-1)  # -1 for unlimited thinking
         )
 
@@ -608,7 +612,7 @@ class RobotSession:
                 return await asyncio.to_thread(
                     execute_control_gripper,
                     args.get('arm_id'),
-                    args.get('action')
+                    args.get('position', 0.5)  # Default to half-open if not specified
                 )
             elif name == "finish_task":
                 return execute_finish_task(args.get('success', False), args.get('summary', ''))

@@ -50,14 +50,17 @@ class GripperController:
         controller.shutdown()
     """
     
-    def __init__(self, dynamixel_controller: Optional[DynamixelController] = None, dry_run=False):
+    def __init__(self, dynamixel_controller: Optional[DynamixelController] = None,
+                 arm_id: Optional[str] = None, dry_run=False):
         """Initialize controller (does not connect to robot yet)
 
         Args:
             dynamixel_controller: Shared DynamixelController instance
+            arm_id: Arm identifier (e.g., 'follower_left', 'follower_right')
             dry_run: If True, validate but don't execute movements
         """
         self.dxl = dynamixel_controller  # Shared DynamixelController
+        self.arm_id = arm_id
         self.dry_run = dry_run
         self.initialized = False
         self.current_state = GripperState.UNKNOWN
@@ -68,6 +71,22 @@ class GripperController:
         # Gripper motor ID
         self.gripper_motor_id = 9
 
+        # Load per-arm gripper calibration from DynamixelController
+        # These are Dynamixel units (0-4095) for open/closed positions
+        if self.dxl and hasattr(self.dxl, 'gripper_calibration') and self.dxl.gripper_calibration:
+            calibration = self.dxl.gripper_calibration.get(
+                arm_id,
+                self.dxl.gripper_calibration.get('default', {})
+            )
+            self.open_units = calibration.get('open', 3140)
+            self.closed_units = calibration.get('closed', 2500)
+            print(f"[GripperController] {arm_id}: open={self.open_units}, closed={self.closed_units}")
+        else:
+            # Fallback to default values
+            self.open_units = 3140
+            self.closed_units = 2500
+            print(f"[GripperController] Using default calibration: open={self.open_units}, closed={self.closed_units}")
+
         # Gripper position thresholds
         self.OPEN_THRESHOLD = FOLLOWER_GRIPPER_JOINT_OPEN - 0.1
         self.CLOSE_THRESHOLD = FOLLOWER_GRIPPER_JOINT_CLOSE + 0.1
@@ -76,9 +95,7 @@ class GripperController:
         """
         Convert gripper position in radians to Dynamixel units.
 
-        Gripper range:
-        - Closed (-0.62 rad) → 1000 Dynamixel units
-        - Open (1.62 rad) → 3800 Dynamixel units
+        Uses per-arm calibration values loaded from config.
 
         Args:
             radians: Gripper position in radians
@@ -86,18 +103,17 @@ class GripperController:
         Returns:
             Dynamixel position (0-4095)
         """
-        # Linear mapping
-        # closed_rad = -0.62 → 1000 units
-        # open_rad = 1.62 → 3800 units
         rad_range = FOLLOWER_GRIPPER_JOINT_OPEN - FOLLOWER_GRIPPER_JOINT_CLOSE  # 2.24
-        unit_range = 3800 - 1000  # 2800
+        unit_range = self.open_units - self.closed_units  # Per-arm calibrated range
 
-        units = int(((radians - FOLLOWER_GRIPPER_JOINT_CLOSE) / rad_range) * unit_range + 1000)
+        units = int(((radians - FOLLOWER_GRIPPER_JOINT_CLOSE) / rad_range) * unit_range + self.closed_units)
         return max(0, min(4095, units))
 
     def _dynamixel_to_radians(self, dynamixel_pos: int) -> float:
         """
         Convert Dynamixel units to radians.
+
+        Uses per-arm calibration values loaded from config.
 
         Args:
             dynamixel_pos: Dynamixel position (0-4095)
@@ -106,10 +122,29 @@ class GripperController:
             Gripper position in radians
         """
         rad_range = FOLLOWER_GRIPPER_JOINT_OPEN - FOLLOWER_GRIPPER_JOINT_CLOSE
-        unit_range = 3800 - 1000
+        unit_range = self.open_units - self.closed_units  # Per-arm calibrated range
 
-        radians = ((dynamixel_pos - 1000) / unit_range) * rad_range + FOLLOWER_GRIPPER_JOINT_CLOSE
+        radians = ((dynamixel_pos - self.closed_units) / unit_range) * rad_range + FOLLOWER_GRIPPER_JOINT_CLOSE
         return radians
+
+    def _get_gripper_position(self) -> Optional[int]:
+        """
+        Get gripper position with fallback to direct read.
+
+        Tries cached position first (fast, no serial access).
+        Falls back to direct sync_read if cached value is None.
+
+        Returns:
+            Gripper position in Dynamixel units, or None if read failed
+        """
+        # Try cached first (no serial access)
+        pos = self.dxl.get_cached_gripper_position()
+        if pos is not None:
+            return pos
+
+        # Fallback to direct read
+        positions = self.dxl.sync_read_positions()
+        return positions.get(self.gripper_motor_id)
 
     def initialize(self) -> bool:
         """
@@ -280,27 +315,27 @@ class GripperController:
             self.dxl.sync_write_positions({self.gripper_motor_id: dynamixel_pos})
 
             if blocking:
-                # Wait for actual position to reach open threshold (max 3 seconds)
-                timeout = 3.0
-                start_time = time.time()
-                last_pos = None
-                while time.time() - start_time < timeout:
-                    current_pos = self.dxl.get_cached_gripper_position()
-                    if current_pos is not None:
-                        position = self._dynamixel_to_radians(current_pos)
-                        if last_pos != current_pos:
-                            print(f"[GripperController] Current position: {current_pos} ({position:.3f} rad), threshold: {self.OPEN_THRESHOLD:.3f} rad")
-                            last_pos = current_pos
-                        if position >= self.OPEN_THRESHOLD:
-                            with self.state_lock:
-                                self.current_state = GripperState.OPEN
-                            print(f"[GripperController] Gripper reached open threshold")
-                            break
-                    time.sleep(0.1)
+                # Simple time-based wait (like arm controller)
+                # Gripper movement takes ~1.5 seconds
+                time.sleep(1.5)
+
+                # Check final position to verify movement succeeded
+                final_pos = self._get_gripper_position()
+                if final_pos is not None:
+                    position = self._dynamixel_to_radians(final_pos)
+                    print(f"[GripperController] Final position: {final_pos} ({position:.3f} rad)")
+                    if position >= self.OPEN_THRESHOLD:
+                        with self.state_lock:
+                            self.current_state = GripperState.OPEN
+                            self.gripper_position = position
+                        print("[GripperController] ✓ Gripper opened successfully")
+                    else:
+                        # Gripper didn't reach open position - may be blocked or have object
+                        with self.state_lock:
+                            self.gripper_position = position
+                        print(f"[GripperController] Gripper stopped at {position:.3f} rad (threshold: {self.OPEN_THRESHOLD:.3f})")
                 else:
-                    # Timeout: gripper didn't reach open position
-                    final_pos = self.dxl.get_cached_gripper_position()
-                    print(f"[GripperController] WARNING: Gripper open timed out. Final position: {final_pos}")
+                    print("[GripperController] WARNING: Could not read final position")
 
         return self.get_gripper_state()
 
@@ -343,29 +378,30 @@ class GripperController:
             self.dxl.sync_write_positions({self.gripper_motor_id: dynamixel_pos})
 
             if blocking:
-                # Wait for actual position to reach closed threshold (max 3 seconds)
-                timeout = 3.0
-                start_time = time.time()
-                last_pos = None
-                while time.time() - start_time < timeout:
-                    current_pos = self.dxl.get_cached_gripper_position()
-                    if current_pos is not None:
-                        position = self._dynamixel_to_radians(current_pos)
-                        if last_pos != current_pos:
-                            print(f"[GripperController] Current position: {current_pos} ({position:.3f} rad), threshold: {self.CLOSE_THRESHOLD:.3f} rad")
-                            last_pos = current_pos
-                        if position <= self.CLOSE_THRESHOLD:
-                            with self.state_lock:
-                                self.current_state = GripperState.CLOSED
-                            print(f"[GripperController] Gripper reached closed threshold")
-                            break
-                    time.sleep(0.1)
+                # Simple time-based wait (like arm controller)
+                # Gripper movement takes ~1.5 seconds
+                time.sleep(1.5)
+
+                # Check final position to verify movement succeeded
+                final_pos = self._get_gripper_position()
+                if final_pos is not None:
+                    position = self._dynamixel_to_radians(final_pos)
+                    print(f"[GripperController] Final position: {final_pos} ({position:.3f} rad)")
+                    if position <= self.CLOSE_THRESHOLD:
+                        with self.state_lock:
+                            self.current_state = GripperState.CLOSED
+                            self.gripper_position = position
+                        print("[GripperController] ✓ Gripper closed successfully")
+                    else:
+                        # Gripper didn't reach fully closed - may have grasped object
+                        with self.state_lock:
+                            self.gripper_position = position
+                        print(f"[GripperController] Gripper stopped at {position:.3f} rad (may have grasped object)")
                 else:
-                    # Timeout: gripper didn't reach closed position
-                    final_pos = self.dxl.get_cached_gripper_position()
-                    print(f"[GripperController] WARNING: Gripper close timed out. Final position: {final_pos}")
+                    print("[GripperController] WARNING: Could not read final position")
 
         result = self.get_gripper_state()
+
         # Verify grasp if requested
         if verify_grasp and blocking:
             grasp_check = self.verify_grasp()
@@ -396,7 +432,19 @@ class GripperController:
         with self.state_lock:
             # Capture position while holding lock to prevent race condition
             position = self.gripper_position
-            state = self.current_state.value
+
+            # Determine state from ACTUAL position, not cached state
+            # This ensures accurate state reporting regardless of cached value
+            if position >= self.OPEN_THRESHOLD:
+                state = GripperState.OPEN.value
+            elif position <= self.CLOSE_THRESHOLD:
+                state = GripperState.CLOSED.value
+            elif self.current_state in [GripperState.OPENING, GripperState.CLOSING]:
+                # Keep transitional state during active movement
+                state = self.current_state.value
+            else:
+                # Between thresholds and not actively moving
+                state = GripperState.UNKNOWN.value
 
             # Normalize position from 0 (closed) to 1 (open)
             pos_range = FOLLOWER_GRIPPER_JOINT_OPEN - FOLLOWER_GRIPPER_JOINT_CLOSE

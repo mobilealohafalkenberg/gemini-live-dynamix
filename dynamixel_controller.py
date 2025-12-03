@@ -100,6 +100,7 @@ class DynamixelController:
         # Motor configuration
         self.motor_config = {}
         self.shadow_motors = {}  # Maps primary -> shadow and vice versa
+        self.gripper_calibration = {}  # Per-arm gripper calibration values
 
         # State tracking
         self.current_positions = {}  # motor_id -> position (Dynamixel units)
@@ -133,6 +134,7 @@ class DynamixelController:
             config = yaml.safe_load(f)
 
         self.motor_config = config.get('motors', {})
+        self.gripper_calibration = config.get('gripper_calibration', {})
 
         # Build shadow motor mapping
         for motor_id, motor_data in self.motor_config.items():
@@ -175,7 +177,7 @@ class DynamixelController:
             print("[DynamixelController] ✓ Motor initialization complete")
 
             self.set_profile_velocity(40)
-            self.set_profile_acceleration(20)
+            self.set_profile_acceleration(50)
 
             # Read initial positions
             self.sync_read_positions()

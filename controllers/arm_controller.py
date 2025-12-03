@@ -430,7 +430,7 @@ class ArmController:
             print(f"[ArmController] Moving to joints: {[f'{a:.3f}' for a in angles_rad]}")
 
             self.dxl.set_profile_velocity(40)
-            self.dxl.set_profile_acceleration(20)
+            self.dxl.set_profile_acceleration(50)
 
             self.dxl.set_joint_positions_radians(np.array(angles_rad))
 
@@ -548,7 +548,7 @@ class ArmController:
             print(f"[ArmController] Safety check passed, executing movement")
 
             self.dxl.set_profile_velocity(40)
-            self.dxl.set_profile_acceleration(20)
+            self.dxl.set_profile_acceleration(50)
 
             self.dxl.set_joint_positions_radians(np.array(joint_list))
 
