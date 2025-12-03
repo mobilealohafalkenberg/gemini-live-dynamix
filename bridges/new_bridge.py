@@ -287,70 +287,29 @@ ROBOT_TOOLS = [move_arm, control_gripper, finish_task]
 
 
 def build_system_instruction(connected_arms: List[str]) -> str:
-    """Build dynamic system instruction with connected arm info (balanced ~100 lines)."""
+    """Build lean system instruction - SDK provides tool docs via schemas."""
     arm_list = ', '.join(f'"{a}"' for a in connected_arms) if connected_arms else '"mock_arm"'
     first_arm = connected_arms[0] if connected_arms else 'mock_arm'
 
     return f"""You are a robotic manipulation agent controlling a ViperX 300s 6-DOF arm.
 
 CONNECTED ARMS: [{arm_list}]
+USE arm_id="{first_arm}" for all function calls.
 
 COORDINATE SYSTEM:
-- Robot base at [0, 0, 0]
-- +X: FORWARD (toward workspace), +Y: LEFT, +Z: UP
-- Units: meters
-- Workspace: X: 0.15-0.50m, Y: -0.30 to 0.30m, Z: 0.05-0.40m
+- Robot base at origin [0, 0, 0]
+- +X: Forward, 
+- +Y: Left,
+- -Y: Right,
+- +Z: Up (meters)
 
-SAFETY RULES:
-1. NEVER command Z < 0.05m (table collision)
-2. Keep Z > 0.15m for travel movements
-3. Max reach ~0.50m from base
-4. ALWAYS open gripper before approaching object
-5. ALWAYS verify grasp in camera before lifting
+EXECUTION PROTOCOL:
+After EVERY action, you receive NEW camera images.
+- Verify success visually before next action
+- If grasp missed, adjust and retry
+- Call finish_task when done or impossible
 
-VISUAL-SERVOING PROTOCOL:
-After EVERY action, you receive NEW camera images showing current state.
-- Verify the action succeeded by examining the new image
-- If gripper missed object, estimate offset and retry
-- Use visual feedback to refine position estimates
-
-EXAMPLE WORKFLOW (Pick and Place):
-1. Analyze overhead camera -> detect object position
-2. move_arm to position above object (Z + 0.15m clearance)
-3. Open gripper (control_gripper action="open")
-4. Descend to grasp height (Z ~ 0.05m above table)
-5. Close gripper (control_gripper action="close")
-6. VERIFY in camera: Is object between gripper jaws?
-   - If YES: Lift and transport
-   - If NO: Open gripper, adjust position, retry
-7. Transport to destination
-8. Lower and release
-9. Return to home, call finish_task
-
-AVAILABLE FUNCTIONS:
-- move_arm(arm_id="{first_arm}", position=[x, y, z], moving_time=1.5)
-- control_gripper(arm_id="{first_arm}", action="open" or "close")
-- finish_task(success=True/False, summary="what was accomplished")
-
-RESPONSE FORMAT (Return valid JSON only):
-{{
-    "reasoning": "What I observe in current images and why this action is needed",
-    "next_action": {{
-        "function": "move_arm",
-        "args": {{"arm_id": "{first_arm}", "position": [0.3, 0.1, 0.2]}}
-    }},
-    "task_complete": false
-}}
-
-When done:
-{{
-    "reasoning": "Task complete - verified in camera",
-    "next_action": null,
-    "task_complete": true,
-    "summary": "What was accomplished"
-}}
-
-Be precise, methodical, verify each action visually before proceeding."""
+Be precise and methodical."""
 
 
 # --- GEMINI SESSION MANAGER ---
@@ -379,11 +338,15 @@ class RobotSession:
         connected_arms = list(arm_controllers.keys())
         self.system_instruction = build_system_instruction(connected_arms)
 
-        # Config for all API calls
+        # Config for all API calls - with SDK native tool calling
         self.config = types.GenerateContentConfig(
             system_instruction=self.system_instruction,
+            tools=ROBOT_TOOLS,  # Pass tool functions to SDK
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                disable=True  # Manual control for image injection between steps
+            ),
             temperature=0.1,
-            thinking_config=types.ThinkingConfig(thinking_budget=1024)
+            thinking_config=types.ThinkingConfig(thinking_budget=0)  # ER model works best with 0
         )
 
     async def start(self):
@@ -409,15 +372,15 @@ class RobotSession:
 
     async def _execute_loop(self):
         """
-        Main execution loop - simple while loop with explicit state.
+        Main execution loop with SDK native tool calling.
 
         Pattern:
-        1. Call Gemini (stateless API)
-        2. Parse JSON response
+        1. Call Gemini (stateless API with tools)
+        2. Process Part.function_call from response
         3. Execute function
         4. Capture new images
-        5. Add feedback to history
-        6. Repeat
+        5. Send Part.from_function_response + images back
+        6. Repeat until finish_task is called
         """
         while self.step < self.MAX_STEPS and self.active:
             self.step += 1
@@ -434,7 +397,7 @@ class RobotSession:
                 # 1. Call Gemini (stateless - pass full history each time)
                 response = await asyncio.to_thread(
                     self.client.models.generate_content,
-                    model='gemini-2.5-flash-preview-05-20',
+                    model='gemini-robotics-er-1.5-preview',
                     contents=self.history,
                     config=self.config
                 )
@@ -448,37 +411,35 @@ class RobotSession:
             if response.candidates and len(response.candidates) > 0:
                 self.history.append(response.candidates[0].content)
 
-            # 3. Parse JSON response
-            result = self._parse_response(response)
+            # 3. Process response parts - look for function_call and text
+            function_call = None
+            reasoning_text = ""
+
+            for part in response.candidates[0].content.parts:
+                # Text part = reasoning/thinking
+                if hasattr(part, 'text') and part.text:
+                    reasoning_text += part.text
+                # Function call part = action to execute
+                if hasattr(part, 'function_call') and part.function_call:
+                    function_call = part.function_call
 
             # 4. Broadcast reasoning to frontend
-            if result.get('reasoning'):
-                print(f"[Gemini] Reasoning: {result['reasoning'][:100]}...")
-                await self._send_ws("reasoning", {"text": result['reasoning']})
+            if reasoning_text:
+                print(f"[Gemini] Reasoning: {reasoning_text[:100]}...")
+                await self._send_ws("reasoning", {"text": reasoning_text})
 
-            # 5. Check for task completion
-            if result.get('task_complete'):
-                print(f"[Session] Task complete: {result.get('summary', 'No summary')}")
-                self.active = False
-                await self._send_ws("task_complete", {
-                    "success": True,
-                    "summary": result.get('summary', 'Task completed')
-                })
-                break
-
-            # 6. Get and execute next action
-            next_action = result.get('next_action')
-            if not next_action:
-                print("[Session] No next action - ending loop")
+            # 5. No function call = task might be complete or model is confused
+            if not function_call:
+                print("[Session] No function call in response")
                 await self._send_ws("task_complete", {
                     "success": False,
-                    "summary": "Model did not provide a next action"
+                    "summary": "Model did not provide a function call"
                 })
                 self.active = False
                 break
 
-            func_name = next_action.get('function', 'unknown')
-            func_args = next_action.get('args', {})
+            func_name = function_call.name
+            func_args = dict(function_call.args) if function_call.args else {}
 
             print(f"[Gemini] Action: {func_name}({func_args})")
 
@@ -488,6 +449,17 @@ class RobotSession:
                 "args": func_args,
                 "step": self.step
             })
+
+            # 6. Check for finish_task (signals task completion)
+            if func_name == "finish_task":
+                success = func_args.get('success', False)
+                summary = func_args.get('summary', 'Task finished')
+                self.active = False
+                await self._send_ws("task_complete", {
+                    "success": success,
+                    "summary": summary
+                })
+                break
 
             # 7. Execute the function
             exec_result = await self._execute_tool(func_name, func_args)
@@ -504,9 +476,9 @@ class RobotSession:
             new_images = capture_encoded_images()
             await self._send_ws("camera_frame", new_images)
 
-            # 9. Build feedback and add to history
-            feedback_parts = self._build_feedback(next_action, exec_result, new_images)
-            self.history.append(types.Content(role='user', parts=feedback_parts))
+            # 9. Build function response + images for next turn
+            response_parts = self._build_function_response(func_name, exec_result, new_images)
+            self.history.append(types.Content(role='user', parts=response_parts))
 
         # Loop ended - check why
         if self.step >= self.MAX_STEPS and self.active:
@@ -517,80 +489,26 @@ class RobotSession:
                 "summary": f"Task terminated after {self.MAX_STEPS} steps"
             })
 
-    def _parse_response(self, response) -> dict:
-        """Parse JSON response from model."""
-        result = {
-            'reasoning': '',
-            'next_action': None,
-            'task_complete': False,
-            'summary': ''
-        }
-
-        try:
-            text = response.text if response.text else ''
-
-            if not text:
-                logging.warning("Empty response from model")
-                return result
-
-            # Handle markdown fencing
-            if "```json" in text:
-                start = text.find("```json") + 7
-                end = text.find("```", start)
-                if end > start:
-                    text = text[start:end].strip()
-            elif "```" in text:
-                start = text.find("```") + 3
-                end = text.find("```", start)
-                if end > start:
-                    text = text[start:end].strip()
-
-            # Parse JSON
-            parsed = json.loads(text)
-
-            result['reasoning'] = parsed.get('reasoning', '')
-            result['next_action'] = parsed.get('next_action')
-            result['task_complete'] = parsed.get('task_complete', False)
-            result['summary'] = parsed.get('summary', '')
-
-        except (json.JSONDecodeError, ValueError) as e:
-            logging.error(f"JSON parse error: {e}")
-            logging.error(f"Raw response: {response.text[:500] if response.text else 'None'}...")
-            result['reasoning'] = f"Parse error: {e}"
-            result['task_complete'] = True  # Fail safe
-
-        return result
-
-    def _build_feedback(self, action: dict, result: dict, images: dict) -> list:
-        """Build feedback content parts for next iteration."""
+    def _build_function_response(self, func_name: str, result: dict, images: dict) -> list:
+        """Build SDK function response + images for next model turn."""
         parts = []
 
-        # Text feedback
-        func_name = action.get('function', 'unknown')
-        func_args = action.get('args', {})
-        success = result.get('status') != 'error'
+        # Part 1: SDK function response (tells model what happened)
+        parts.append(types.Part.from_function_response(
+            name=func_name,
+            response={"result": result}
+        ))
 
-        feedback_text = f"""EXECUTION RESULT:
-Function: {func_name}
-Arguments: {json.dumps(func_args)}
-Success: {success}
-"""
-        if result.get('message'):
-            feedback_text += f"Message: {result['message']}\n"
-        if result.get('status') == 'error':
-            feedback_text += f"Error: {result.get('error', 'Unknown')}\n"
-        if result.get('final_position'):
-            feedback_text += f"Final position: {result['final_position']}\n"
-
-        feedback_text += "\nNEW CAMERA IMAGES show current state. Analyze and decide next action."
-
-        parts.append(types.Part.from_text(text=feedback_text))
-
-        # Add images
+        # Part 2: New camera images (visual verification)
         for cam_name, b64 in images.items():
             if b64:
                 img_bytes = base64.b64decode(b64)
                 parts.append(types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"))
+
+        # Part 3: Prompt to analyze new state
+        parts.append(types.Part.from_text(
+            text="Action complete. Examine the new camera images to verify the result."
+        ))
 
         return parts
 
