@@ -558,6 +558,14 @@ class ArmController:
             # Convert to list
             joint_list = list(joint_solution)
 
+            # Normalize continuous joints to [-π, π] to avoid multi-rotation IK solutions
+            # Joints 0 (waist), 3 (forearm_roll), 5 (wrist_rotate) can rotate continuously
+            for i in [0, 3, 5]:
+                while joint_list[i] > math.pi:
+                    joint_list[i] -= 2 * math.pi
+                while joint_list[i] < -math.pi:
+                    joint_list[i] += 2 * math.pi
+
             print(f"[ArmController] IK solution: joints={[f'{math.degrees(j):.1f}°' for j in joint_list]}")
 
             # Safety check the IK solution before executing

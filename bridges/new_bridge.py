@@ -311,6 +311,22 @@ def build_tool_declarations(connected_arms: List[str]) -> types.Tool:
                     },
                     required=["success", "summary"]
                 )
+            ),
+
+            # resume_after_stop - Recovery from error state
+            types.FunctionDeclaration(
+                name="resume_after_stop",
+                description="Resume arm operations after an error. Call this when you see 'System in ERROR state' to clear the error and retry commands.",
+                parameters=types.Schema(
+                    type=types.Type.OBJECT,
+                    properties={
+                        "arm_id": types.Schema(
+                            type=types.Type.STRING,
+                            description=arm_enum_desc
+                        )
+                    },
+                    required=["arm_id"]
+                )
             )
         ]
     )
@@ -393,6 +409,32 @@ def execute_control_gripper(arm_id: str, position: float) -> Dict[str, Any]:
 def execute_finish_task(success: bool, summary: str) -> Dict[str, Any]:
     """Execute finish_task tool."""
     return {"status": "task_ended", "success": success, "summary": summary}
+
+
+def execute_resume_after_stop(arm_id: str) -> Dict[str, Any]:
+    """Resume arm operations after error state.
+
+    Args:
+        arm_id: Which arm to resume (follower_right, follower_left)
+    """
+    print(f"[Robot] Resuming {arm_id} after error/stop")
+
+    if arm_id not in arm_controllers:
+        return {"status": "error", "error": f"Arm '{arm_id}' not found. Available: {list(arm_controllers.keys())}"}
+
+    try:
+        arm = arm_controllers[arm_id]['arm']
+        result = arm.resume_after_stop()
+        if result.get('success'):
+            return {
+                "status": "success",
+                "state": result.get('state', 'resumed'),
+                "message": result.get('message', 'Arm resumed. Ready for commands.')
+            }
+        else:
+            return {"status": "error", "error": result.get('error', 'Resume failed')}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
 
 
 def build_system_instruction(connected_arms: List[str]) -> str:
@@ -636,6 +678,11 @@ class RobotSession:
                 )
             elif name == "finish_task":
                 return execute_finish_task(args.get('success', False), args.get('summary', ''))
+            elif name == "resume_after_stop":
+                return await asyncio.to_thread(
+                    execute_resume_after_stop,
+                    args.get('arm_id')
+                )
             else:
                 return {"status": "error", "error": f"Unknown tool: {name}"}
         except Exception as e:
