@@ -259,6 +259,11 @@ def build_tool_declarations(connected_arms: List[str]) -> types.Tool:
                             items=types.Schema(type=types.Type.NUMBER),
                             description="Target [x, y, z] position in meters. Robot base is origin. +X=forward, +Y=left, +Z=up."
                         ),
+                        "orientation": types.Schema(
+                            type=types.Type.ARRAY,
+                            items=types.Schema(type=types.Type.NUMBER),
+                            description="Optional [roll, pitch, yaw] in radians. pitch=-1.57 points straight down, pitch=-0.78 points 45° down. If not provided, orientation auto-adjusts to point toward the target."
+                        ),
                         "moving_time": types.Schema(
                             type=types.Type.NUMBER,
                             description="Movement duration in seconds (default: 1.5)"
@@ -313,16 +318,26 @@ def build_tool_declarations(connected_arms: List[str]) -> types.Tool:
 
 # --- TOOL EXECUTION FUNCTIONS ---
 
-def execute_move_arm(arm_id: str, position: List[float], moving_time: float = 1.5) -> Dict[str, Any]:
-    """Execute move_arm tool."""
-    print(f"[Robot] Moving {arm_id} to {position}")
+def execute_move_arm(arm_id: str, position: List[float], orientation: Optional[List[float]] = None, moving_time: float = 1.5) -> Dict[str, Any]:
+    """Execute move_arm tool.
+
+    Args:
+        arm_id: Which arm (follower_right, follower_left)
+        position: [x, y, z] in meters
+        orientation: Optional [roll, pitch, yaw] in radians. If None, auto-calculates.
+        moving_time: Movement duration in seconds
+    """
+    if orientation:
+        print(f"[Robot] Moving {arm_id} to {position} with orientation {orientation}")
+    else:
+        print(f"[Robot] Moving {arm_id} to {position} (auto-orientation)")
 
     if arm_id not in arm_controllers:
         return {"status": "error", "error": f"Arm '{arm_id}' not found. Available: {list(arm_controllers.keys())}"}
 
     try:
         arm = arm_controllers[arm_id]['arm']
-        result = arm.move_to_position(position, moving_time=moving_time, blocking=True)
+        result = arm.move_to_position(position, orientation=orientation, moving_time=moving_time, blocking=True)
         if result.get('success'):
             state = arm.get_arm_state()
             return {
@@ -610,6 +625,7 @@ class RobotSession:
                     execute_move_arm,
                     args.get('arm_id'),
                     args.get('position'),
+                    args.get('orientation'),  # None if not provided
                     args.get('moving_time', 1.5)
                 )
             elif name == "control_gripper":

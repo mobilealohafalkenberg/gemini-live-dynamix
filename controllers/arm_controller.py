@@ -490,11 +490,34 @@ class ArmController:
                     "message": "Dry run - movement not executed"
                 }
 
-            # Default orientation if not provided
+            # Default orientation if not provided - auto-calculate pitch and yaw
             if orientation is None:
-                # Calculate yaw to face the target
+                # Yaw: face toward target position
                 yaw = math.atan2(pos['y'], pos['x'])
-                orientation = [0.0, 0.0, yaw]
+
+                # Pitch: automatically point toward target based on height difference
+                # Get current gripper height (or use default working height)
+                if self.current_ee_pose is not None:
+                    current_z = float(self.current_ee_pose[2, 3])
+                else:
+                    current_z = 0.3  # Default working height if unknown
+
+                # Distance to target in XY plane
+                distance_xy = math.sqrt(pos['x']**2 + pos['y']**2)
+
+                # Height difference (negative when target is below gripper)
+                dz = pos['z'] - current_z
+
+                # Calculate pitch angle (negative = down, positive = up)
+                if distance_xy > 0.05:  # Avoid division issues for very close targets
+                    pitch = math.atan2(dz, distance_xy)
+                    # Clamp to safe range: -90° to +45°
+                    pitch = max(-1.57, min(0.78, pitch))
+                else:
+                    pitch = 0.0
+
+                orientation = [0.0, pitch, yaw]
+                print(f"[ArmController] Auto-orientation: pitch={math.degrees(pitch):.1f}°, yaw={math.degrees(yaw):.1f}°")
             
             with self.state_lock:
                 self.current_state = ArmState.MOVING
