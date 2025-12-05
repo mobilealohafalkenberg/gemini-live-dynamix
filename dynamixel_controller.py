@@ -93,6 +93,13 @@ class DynamixelController:
         self.baudrate = baudrate
         self.config_file = config_file
 
+        # Extract arm_id from port name (e.g., '/dev/ttyDXL_follower_right' -> 'follower_right')
+        self.arm_id = None
+        if 'follower_left' in port:
+            self.arm_id = 'follower_left'
+        elif 'follower_right' in port:
+            self.arm_id = 'follower_right'
+
         # Port and packet handlers
         self.port_handler = None
         self.packet_handler = None
@@ -135,6 +142,7 @@ class DynamixelController:
 
         self.motor_config = config.get('motors', {})
         self.gripper_calibration = config.get('gripper_calibration', {})
+        self.joint_calibration = config.get('joint_calibration', {})
 
         # Build shadow motor mapping
         for motor_id, motor_data in self.motor_config.items():
@@ -144,6 +152,34 @@ class DynamixelController:
                 print(f"[DynamixelController] Shadow pair: {motor_id} ↔ {secondary}")
 
         print(f"[DynamixelController] Loaded configuration for {len(self.motor_config)} motors")
+        if self.arm_id and self.arm_id in self.joint_calibration:
+            print(f"[DynamixelController] Using calibrated joint limits for {self.arm_id}")
+
+    def get_calibrated_limits(self, motor_id: int) -> Tuple[int, int]:
+        """
+        Get calibrated position limits for a motor.
+
+        Uses per-arm calibration if available, falls back to global motor config.
+
+        Args:
+            motor_id: Motor ID
+
+        Returns:
+            Tuple of (min_position, max_position) in Dynamixel units
+        """
+        # Try per-arm calibration first
+        if self.arm_id and self.arm_id in self.joint_calibration:
+            arm_calib = self.joint_calibration[self.arm_id]
+            if motor_id in arm_calib:
+                return (arm_calib[motor_id]['min'], arm_calib[motor_id]['max'])
+
+        # Fall back to global motor config
+        if motor_id in self.motor_config:
+            motor = self.motor_config[motor_id]
+            return (motor.get('Min_Position', 0), motor.get('Max_Position', 4095))
+
+        # Default to full range
+        return (0, 4095)
 
     def initialize_motors(self) -> bool:
         """
@@ -207,8 +243,10 @@ class DynamixelController:
         vel_limit = config.get('Velocity_Limit', 131)
         self.write_register(motor_id, self.ADDR_VELOCITY_LIMIT, 4, vel_limit)
 
+        # Show calibrated limits for this arm
+        min_pos, max_pos = self.get_calibrated_limits(motor_id)
         print(f"[DynamixelController]   Motor {motor_id}: Mode=3, Drive={drive_mode}, "
-              f"Limits=[{config.get('Min_Position')}, {config.get('Max_Position')}]")
+              f"Limits=[{min_pos}, {max_pos}]")
 
     def enable_torque(self, motor_ids: Optional[List[int]] = None):
         """
@@ -430,8 +468,9 @@ class DynamixelController:
 
             # Add parameters for each motor
             for motor_id, position in expanded_positions.items():
-                # Clamp position to valid range
-                position = max(0, min(4095, int(position)))
+                # Clamp position to calibrated limits for this arm/motor
+                min_pos, max_pos = self.get_calibrated_limits(motor_id)
+                position = max(min_pos, min(max_pos, int(position)))
 
                 # Convert to byte array
                 position_bytes = [

@@ -102,6 +102,48 @@ gripper_calibration:
     open: 3140
     closed: 2500
 
+# Per-arm joint limit calibration (Dynamixel units)
+# These values were measured by manually moving joints to their limits
+joint_calibration:
+  follower_right:
+    1:  # Waist
+      min: 1490
+      max: 2789
+    2:  # Shoulder
+      min: 937
+      max: 2957
+    4:  # Elbow
+      min: 836
+      max: 3081
+    6:  # Forearm Roll
+      min: 1050
+      max: 3106
+    7:  # Wrist Angle
+      min: 882
+      max: 2600  # Extended to allow sleep pose (needs 2569)
+    8:  # Wrist Rotate
+      min: 1376
+      max: 3043
+  follower_left:
+    1:  # Waist
+      min: 1473
+      max: 2562
+    2:  # Shoulder
+      min: 870
+      max: 2937
+    4:  # Elbow
+      min: 1018
+      max: 3097
+    6:  # Forearm Roll
+      min: 1038
+      max: 3070
+    7:  # Wrist Angle
+      min: 854
+      max: 2600  # Extended to allow sleep pose (needs 2569)
+    8:  # Wrist Rotate
+      min: 1092
+      max: 3071
+
 # Named poses (in radians for joints 1-6)
 poses:
   home: [0.0, -0.3, 0.6, 0.0, -0.3, 0.0]

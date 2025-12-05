@@ -260,7 +260,135 @@ class ArmController:
                          f"Risk of cable wrap.")
 
         return True, ""
-    
+
+    def _normalize_continuous_joints(self, joints: List[float]) -> List[float]:
+        """
+        Normalize continuous joints (waist, forearm_roll, wrist_rotate) to [-π, π].
+
+        Args:
+            joints: List of 6 joint angles in radians
+
+        Returns:
+            List of normalized joint angles
+        """
+        result = list(joints)  # Make a copy
+        for i in [0, 3, 5]:  # waist, forearm_roll, wrist_rotate
+            while result[i] > math.pi:
+                result[i] -= 2 * math.pi
+            while result[i] < -math.pi:
+                result[i] += 2 * math.pi
+        return result
+
+    def _check_joint_limits(self, joints: List[float]) -> bool:
+        """
+        Check if all joints are within model limits.
+
+        Args:
+            joints: List of 6 joint angles in radians
+
+        Returns:
+            True if all joints within limits, False otherwise
+        """
+        is_valid, _ = self.model.validate_joint_angles(np.array(joints))
+        return is_valid
+
+    def _score_ik_solution(self, solution: List[float], current_joints: List[float]) -> float:
+        """
+        Score an IK solution (lower is better).
+
+        Preferences:
+        - Waist near 0° (front-facing): weight 2.0
+        - Forearm roll near 0° (gripper upright): weight 1.5
+        - Minimal change from current position: weight 1.0
+
+        Args:
+            solution: Proposed joint angles in radians
+            current_joints: Current joint angles in radians
+
+        Returns:
+            Score (lower is better)
+        """
+        waist, shoulder, elbow, forearm_roll, wrist_angle, wrist_rotate = solution
+
+        score = 0.0
+
+        # Prefer front-facing (waist near 0)
+        score += 2.0 * abs(waist)
+
+        # Prefer gripper upright (forearm_roll near 0)
+        score += 1.5 * abs(forearm_roll)
+
+        # Prefer minimal joint movement from current position
+        for i in range(6):
+            score += 1.0 * abs(solution[i] - current_joints[i])
+
+        return score
+
+    def _compute_ik_with_preference(
+        self,
+        T_target: np.ndarray,
+        current_joints: List[float],
+        custom_guess: Optional[List[float]] = None
+    ) -> Tuple[Optional[List[float]], bool]:
+        """
+        Compute IK with multiple initial guesses, prefer front-facing configuration.
+
+        Strategy: Try 4 different initial guesses to explore solution space,
+        then select the solution that keeps the arm in a natural configuration.
+
+        Args:
+            T_target: 4x4 homogeneous transformation matrix for target pose
+            current_joints: Current joint angles (used as one of the guesses)
+            custom_guess: Optional caller-provided initial guess (overrides default guesses)
+
+        Returns:
+            Tuple of (joint_solution, success)
+        """
+        if custom_guess is not None:
+            guesses = [custom_guess]
+        else:
+            guesses = [
+                list(current_joints),                        # Current position (smoothest motion)
+                [0.0] * 6,                                   # Home (front-facing)
+                [math.radians(-120)] + [0.0] * 5,           # Left-biased waist
+                [math.radians(120)] + [0.0] * 5,            # Right-biased waist
+            ]
+
+        valid_solutions = []
+
+        for guess in guesses:
+            theta_list, success = mr.IKinSpace(
+                self.model.Slist,
+                self.model.M,
+                T_target,
+                guess,
+                eomg=0.001,  # Tighter angular tolerance (was 0.01)
+                ev=0.001     # Linear tolerance
+            )
+
+            if success:
+                # Normalize continuous joints to [-π, π]
+                theta_list = self._normalize_continuous_joints(list(theta_list))
+
+                # Check joint limits
+                if self._check_joint_limits(theta_list):
+                    # Also check safety constraints (wrist rotation limits)
+                    is_safe, _ = self.check_safety_constraints(theta_list)
+                    if is_safe:
+                        valid_solutions.append(theta_list)
+
+        if not valid_solutions:
+            return None, False
+
+        # Score and select best solution (lowest score wins)
+        best = min(valid_solutions, key=lambda sol: self._score_ik_solution(sol, current_joints))
+
+        # Log if we had multiple solutions
+        if len(valid_solutions) > 1:
+            print(f"[ArmController] Found {len(valid_solutions)} valid IK solutions, selected best (waist={math.degrees(best[0]):.1f}°)")
+
+        return best, True
+
     def parse_joint_angles(self, angles: List[float], unit: str = 'auto') -> List[float]:
         """
         Parse joint angles with automatic unit detection.
@@ -534,15 +662,11 @@ class ArmController:
                     self.current_state = ArmState.ERROR
                 return {"success": False, "error": "Failed to read current position", "state": "error"}
 
-            # Run IK using Modern Robotics
-            print(f"[ArmController] Computing IK solution...")
-            joint_solution, success = mr.IKinSpace(
-                self.model.Slist,
-                self.model.M,
+            # Run IK with multi-guess strategy for better configuration selection
+            print(f"[ArmController] Computing IK solution with preference...")
+            joint_list, success = self._compute_ik_with_preference(
                 T_target,
-                current_joints,
-                eomg=0.01,  # Angular error tolerance
-                ev=0.001    # Linear error tolerance
+                list(current_joints)
             )
 
             if not success:
@@ -555,28 +679,7 @@ class ArmController:
                     "target_position": pos
                 }
 
-            # Convert to list
-            joint_list = list(joint_solution)
-
-            # Normalize continuous joints to [-π, π] to avoid multi-rotation IK solutions
-            # Joints 0 (waist), 3 (forearm_roll), 5 (wrist_rotate) can rotate continuously
-            for i in [0, 3, 5]:
-                while joint_list[i] > math.pi:
-                    joint_list[i] -= 2 * math.pi
-                while joint_list[i] < -math.pi:
-                    joint_list[i] += 2 * math.pi
-
             print(f"[ArmController] IK solution: joints={[f'{math.degrees(j):.1f}°' for j in joint_list]}")
-
-            # Safety check the IK solution before executing
-            is_safe, warning = self.check_safety_constraints(joint_list, ee_position=pos)
-            if not is_safe:
-                print(f"[ArmController] ⚠️ SAFETY BLOCKED: {warning}")
-                with self.state_lock:
-                    self.current_state = ArmState.ERROR
-                return {"success": False, "error": f"Safety: {warning}", "state": "error"}
-
-            print(f"[ArmController] Safety check passed, executing movement")
 
             self.dxl.set_profile_velocity(40)
             self.dxl.set_profile_acceleration(50)
