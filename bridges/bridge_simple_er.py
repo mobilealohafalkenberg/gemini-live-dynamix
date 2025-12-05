@@ -1331,30 +1331,32 @@ GRIPPER STATE: {gripper_state_str} (position: {gripper_pos:.3f}m)
 CAMERA SETUP
 ═══════════════════════════════════════════════════════════
 
-You will receive 2 camera images with each request IN THIS EXACT ORDER:
+You receive 3 camera images in this order (left-to-right):
 
-IMAGE 1 (FIRST IMAGE) - GRIPPER CAMERA:
-- Location: Mounted on robot end-effector (gripper base)
-- Field of View: 70° FOV
-- Orientation: Looking down from gripper at ~155° angle
-- Purpose: VERIFY GRASPS - Check if objects are IN the gripper
-- Use for: Confirming successful grasps, detecting objects in gripper
+IMAGE 1 - LEFT_GRIPPER:
+- Mounted on the LEFT arm's gripper
+- Shows what the LEFT gripper is holding/approaching
+- Use to verify LEFT arm grasps
 
-IMAGE 2 (SECOND IMAGE) - OVERHEAD CAMERA:
-- Location: Bird's-eye view above workspace at [0, -0.3, 1.0]
-- Field of View: 60° FOV
-- Orientation: Looking down at entire workspace
-- Purpose: SPATIAL REASONING - Localize objects, plan trajectories
-- Use for: Object detection, position estimation, collision avoidance
+IMAGE 2 - OVERHEAD_CAMERA:
+- Bird's-eye view above workspace
+- Shows entire scene from above
+- Use for spatial planning and object localization
 
-CRITICAL: Images will always appear in the order above. First image = gripper view, Second image = overhead view.
-          Use GRIPPER CAMERA to verify if an object is grasped.
-          Use OVERHEAD CAMERA for spatial relationships and planning.
+IMAGE 3 - RIGHT_GRIPPER:
+- Mounted on the RIGHT arm's gripper
+- Shows what the RIGHT gripper is holding/approaching
+- Use to verify RIGHT arm grasps
+
+CRITICAL: Match the camera to the arm!
+- LEFT arm grasp verification → use LEFT_GRIPPER camera (IMAGE 1)
+- RIGHT arm grasp verification → use RIGHT_GRIPPER camera (IMAGE 3)
+- Scene overview/planning → use OVERHEAD_CAMERA (IMAGE 2)
 
 {build_tool_definitions(list(arm_controllers.keys()))}
 
 def capture_camera_frame(reason: str):
-    '''Capture fresh camera frames from gripper and overhead cameras.
+    '''Capture fresh camera frames from left_gripper, overhead, and right_gripper cameras.
 
     CRITICAL: Call this AFTER robot movements to see updated scene state.
     Always capture new frames before planning your next action to ensure
@@ -1364,7 +1366,8 @@ def capture_camera_frame(reason: str):
         reason: Why you need fresh frames. Examples:
             - "verify_movement" - Check if robot reached target position
             - "inspect_object" - Get clear view of object for planning
-            - "check_grasp" - Verify object is secured in gripper
+            - "check_left_grasp" - Verify object is secured in LEFT gripper
+            - "check_right_grasp" - Verify object is secured in RIGHT gripper
             - "detect_objects" - Find and localize objects in scene
             - "final_verification" - Confirm task completion
 

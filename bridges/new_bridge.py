@@ -392,6 +392,10 @@ Use the appropriate arm_id from the available arms for all function calls.
 COORDINATE SYSTEM (meters, relative to robot base):
 +X: Forward | +Y: Left | -Y: Right | +Z: Up
 
+CAMERAS:
+- Gripper cameras (left_gripper, right_gripper) are mounted on their respective arm's gripper
+- Overhead camera provides a bird's-eye view of the workspace
+
 EXECUTION PROTOCOL:
 1. After EVERY action, examine NEW camera images to verify result
 2. If action failed or missed, adjust and retry
