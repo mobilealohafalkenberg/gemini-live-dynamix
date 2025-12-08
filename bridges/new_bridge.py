@@ -691,15 +691,30 @@ class RobotSession:
                 self.active = False
                 break
 
-            # 2. Store response in history
-            if response.candidates and len(response.candidates) > 0:
-                self.history.append(response.candidates[0].content)
+            # 2. Check for valid response content
+            if not response.candidates or len(response.candidates) == 0:
+                print("[Session] No candidates in response")
+                await self._send_ws("error", {"message": "No candidates in API response"})
+                self.active = False
+                break
+
+            candidate = response.candidates[0]
+            if candidate.content is None:
+                # This can happen if the response was blocked by safety filters
+                finish_reason = getattr(candidate, 'finish_reason', 'unknown')
+                print(f"[Session] Response content is None (finish_reason: {finish_reason})")
+                await self._send_ws("error", {"message": f"Empty response from model (reason: {finish_reason})"})
+                self.active = False
+                break
+
+            # Store response in history
+            self.history.append(candidate.content)
 
             # 3. Process response parts - look for function_call and text
             function_call = None
             reasoning_text = ""
 
-            for part in response.candidates[0].content.parts:
+            for part in candidate.content.parts:
                 # Text part = reasoning/thinking
                 if hasattr(part, 'text') and part.text:
                     reasoning_text += part.text
