@@ -292,14 +292,17 @@ class ArmController:
         """
         Generate IK initial guesses based on calibrated joint limits.
 
-        Creates diverse guesses that explore valid solution space including
-        configurations suitable for downward-facing manipulation poses.
+        Creates 4 guesses that explore the valid solution space:
+        1. Current position (for smooth motion)
+        2. Center of joint ranges (neutral pose)
+        3. Positive waist bias (for targets to the left)
+        4. Negative waist bias (for targets to the right)
 
         Args:
             current_joints: Current joint positions in radians
 
         Returns:
-            List of joint angle guesses, each a list of 6 floats
+            List of 4 joint angle guesses, each a list of 6 floats
         """
         limits = self._get_joint_limits()
 
@@ -318,43 +321,19 @@ class ArmController:
             j_min, j_max = limits[i]
             joint_centers.append((j_min + j_max) / 2)
 
-        # VX300S joint mapping:
-        # 0: waist, 1: shoulder, 2: elbow, 3: forearm_roll, 4: wrist_angle, 5: wrist_rotate
-
-        # "Ready" pose - good starting point for manipulation
-        # [waist=0, shoulder=-0.96, elbow=1.16, forearm=0, wrist_angle=-0.3, wrist_rotate=0]
-        ready_pose = [0.0, -0.96, 1.16, 0.0, -0.3, 0.0]
-
-        # "Reaching down" configuration - for picking up objects
-        # Shoulder extended forward, elbow bent, wrist tilted down
-        reach_down = [0.0, -0.5, 0.8, 0.0, -0.8, 0.0]
-
-        # "Low reach" - for objects near table surface
-        # More shoulder extension, wrist pitched down
-        low_reach = [0.0, -0.3, 0.6, 0.0, -1.2, 0.0]
-
         # Build guesses
         guesses = [
             # 1. Current position (smoothest motion)
             list(current_joints),
 
-            # 2. Ready pose (known good manipulation configuration)
-            ready_pose.copy(),
-
-            # 3. Reaching down configuration
-            reach_down.copy(),
-
-            # 4. Low reach configuration
-            low_reach.copy(),
-
-            # 5. Center of all joint ranges (neutral pose)
+            # 2. Center of all joint ranges (neutral pose)
             joint_centers.copy(),
 
-            # 6. Positive waist bias with reach_down (targets to the left)
-            [waist_positive] + reach_down[1:],
+            # 3. Positive waist bias (for targets to the left of robot)
+            [waist_positive] + joint_centers[1:],
 
-            # 7. Negative waist bias with reach_down (targets to the right)
-            [waist_negative] + reach_down[1:],
+            # 4. Negative waist bias (for targets to the right of robot)
+            [waist_negative] + joint_centers[1:],
         ]
 
         return guesses
@@ -734,34 +713,31 @@ class ArmController:
                     "message": "Dry run - movement not executed"
                 }
 
-            # Default orientation if not provided - auto-calculate for manipulation
+            # Default orientation if not provided - auto-calculate pitch and yaw
             if orientation is None:
-                # Yaw: Keep gripper facing FORWARD for manipulation tasks
-                # (yaw=0 means gripper points along +X axis, camera sees what's in front)
-                # Small yaw adjustments based on target Y position for better reach
-                if abs(pos['y']) > 0.15:
-                    # Significant lateral offset - slight yaw toward target
-                    yaw = math.atan2(pos['y'], pos['x']) * 0.3  # 30% of full angle
-                else:
-                    yaw = 0.0  # Face forward
+                # Yaw: face toward target position
+                yaw = math.atan2(pos['y'], pos['x'])
 
-                # Pitch: Point DOWNWARD for manipulation (reaching for objects)
-                # Lower targets need steeper downward pitch
-                if pos['z'] < 0.10:
-                    # Very low (near table) - steep downward pitch
-                    pitch = -1.3  # ~-75 degrees
-                elif pos['z'] < 0.20:
-                    # Low targets - strong downward pitch
-                    pitch = -1.0  # ~-57 degrees
-                elif pos['z'] < 0.30:
-                    # Mid-height - moderate downward pitch
-                    pitch = -0.78  # ~-45 degrees
+                # Pitch: automatically point toward target based on height difference
+                # Get current gripper height (or use default working height)
+                if self.current_ee_pose is not None:
+                    current_z = float(self.current_ee_pose[2, 3])
                 else:
-                    # Higher targets - slight downward pitch
-                    pitch = -0.52  # ~-30 degrees
+                    current_z = 0.3  # Default working height if unknown
 
-                # Clamp to safe range
-                pitch = max(-1.4, min(0.3, pitch))
+                # Distance to target in XY plane
+                distance_xy = math.sqrt(pos['x']**2 + pos['y']**2)
+
+                # Height difference (negative when target is below gripper)
+                dz = pos['z'] - current_z
+
+                # Calculate pitch angle (negative = down, positive = up)
+                if distance_xy > 0.05:  # Avoid division issues for very close targets
+                    pitch = math.atan2(dz, distance_xy)
+                    # Clamp to safe range: -90° to +45°
+                    pitch = max(-1.57, min(0.78, pitch))
+                else:
+                    pitch = 0.0
 
                 orientation = [0.0, pitch, yaw]
                 print(f"[ArmController] Auto-orientation: pitch={math.degrees(pitch):.1f}°, yaw={math.degrees(yaw):.1f}°")
