@@ -262,11 +262,11 @@ def build_tool_declarations(connected_arms: List[str]) -> types.Tool:
                         "orientation": types.Schema(
                             type=types.Type.ARRAY,
                             items=types.Schema(type=types.Type.NUMBER),
-                            description="Optional [roll, pitch, yaw] in radians. If not provided, auto-calculates based on task_hint."
+                            description="Optional [roll, pitch, yaw] in radians. Overrides pitch_degrees if provided."
                         ),
-                        "task_hint": types.Schema(
-                            type=types.Type.STRING,
-                            description="Task type for auto-orientation: 'grasp_from_above' (steep downward pitch for picking), 'place_down' (same as grasp), 'reach_horizontal' (gentle pitch for reaching). If omitted, auto-detects from z-height."
+                        "pitch_degrees": types.Schema(
+                            type=types.Type.NUMBER,
+                            description="Gripper pitch in degrees. Negative = down (e.g., -45 for steep down, -15 for nearly horizontal). Default is -30°. Common values: -60 (very steep), -45 (steep), -30 (moderate), -15 (gentle), 0 (horizontal)."
                         ),
                         "moving_time": types.Schema(
                             type=types.Type.NUMBER,
@@ -381,29 +381,29 @@ def build_tool_declarations(connected_arms: List[str]) -> types.Tool:
 
 # --- TOOL EXECUTION FUNCTIONS ---
 
-def execute_move_arm(arm_id: str, position: List[float], orientation: Optional[List[float]] = None, task_hint: Optional[str] = None, moving_time: float = 1.5) -> Dict[str, Any]:
+def execute_move_arm(arm_id: str, position: List[float], orientation: Optional[List[float]] = None, pitch_degrees: Optional[float] = None, moving_time: float = 1.5) -> Dict[str, Any]:
     """Execute move_arm tool.
 
     Args:
         arm_id: Which arm (follower_right, follower_left)
         position: [x, y, z] in meters
-        orientation: Optional [roll, pitch, yaw] in radians. If None, auto-calculates.
-        task_hint: Task type for auto-orientation ('grasp_from_above', 'place_down', 'reach_horizontal')
+        orientation: Optional [roll, pitch, yaw] in radians. If None, uses pitch_degrees.
+        pitch_degrees: Gripper pitch in degrees (negative = down). Default is -30°.
         moving_time: Movement duration in seconds
     """
     if orientation:
         print(f"[Robot] Moving {arm_id} to {position} with orientation {orientation}")
-    elif task_hint:
-        print(f"[Robot] Moving {arm_id} to {position} (task_hint: {task_hint})")
+    elif pitch_degrees is not None:
+        print(f"[Robot] Moving {arm_id} to {position} (pitch: {pitch_degrees}°)")
     else:
-        print(f"[Robot] Moving {arm_id} to {position} (auto-orientation)")
+        print(f"[Robot] Moving {arm_id} to {position} (default pitch: -30°)")
 
     if arm_id not in arm_controllers:
         return {"status": "error", "error": f"Arm '{arm_id}' not found. Available: {list(arm_controllers.keys())}"}
 
     try:
         arm = arm_controllers[arm_id]['arm']
-        result = arm.move_to_position(position, orientation=orientation, task_hint=task_hint, moving_time=moving_time, blocking=True)
+        result = arm.move_to_position(position, orientation=orientation, pitch_degrees=pitch_degrees, moving_time=moving_time, blocking=True)
         if result.get('success'):
             state = arm.get_arm_state()
             response = {
@@ -563,12 +563,19 @@ COORDINATE SYSTEM (meters, relative to robot base):
 +X: Forward | +Y: Left | -Y: Right | +Z: Up
 Typical workspace: X: 0.15-0.50m, Y: -0.30 to +0.30m, Z: 0.02-0.40m
 
-TASK HINTS FOR ORIENTATION:
-When calling move_arm, use task_hint to get optimal gripper orientation:
-- 'grasp_from_above': Gripper points steeply DOWN for picking objects
-- 'place_down': Same as grasp_from_above, for placing objects
-- 'reach_horizontal': Gripper faces forward (for general reaching)
-If task_hint is omitted, orientation auto-detects based on target height.
+GRIPPER PITCH CONTROL:
+When calling move_arm, use pitch_degrees to control how much the gripper tilts down:
+- pitch_degrees: -60 = very steep down (only achievable at low z < 0.25m)
+- pitch_degrees: -45 = steep down (for picking objects at low heights)
+- pitch_degrees: -30 = moderate down (default, works at most positions)
+- pitch_degrees: -15 = gentle down (for viewing/inspection)
+- pitch_degrees: 0 = horizontal (gripper facing forward)
+
+IMPORTANT: Achievable pitch depends on position height:
+- High positions (z > 0.30m): max pitch around -30°
+- Low positions (z < 0.25m): can achieve up to -60°
+If requested pitch is not achievable, it will be relaxed toward horizontal.
+If pitch_degrees is omitted, defaults to -30°. Yaw auto-calculates to face target.
 
 TRAJECTORY TOOL FOR PICK-AND-PLACE:
 For pick-and-place sequences, use execute_trajectory instead of multiple move_arm calls.
@@ -797,8 +804,8 @@ class RobotSession:
                     execute_move_arm,
                     args.get('arm_id'),
                     args.get('position'),
-                    args.get('orientation'),  # None if not provided
-                    args.get('task_hint'),    # None if not provided
+                    args.get('orientation'),    # None if not provided
+                    args.get('pitch_degrees'),  # None if not provided (defaults to -30°)
                     args.get('moving_time', 1.5)
                 )
             elif name == "control_gripper":

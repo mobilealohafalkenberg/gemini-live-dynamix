@@ -391,104 +391,34 @@ class ArmController:
 
         return True
 
-    def _calculate_achievable_pitch(self, target_z: float, distance_xy: float) -> float:
-        """
-        Calculate an achievable pitch angle based on target height and reach.
-
-        Uses empirically validated pitch ranges for VX300S:
-        - High (z > 0.30m): -20° base, limited downward pitch
-        - Mid (z = 0.20-0.30m): -35° base
-        - Low (z = 0.10-0.20m): -45° base
-        - Table level (z < 0.10m): -60° base
-
-        Extended reaches limit downward pitch capability.
-
-        Args:
-            target_z: Target Z position in meters
-            distance_xy: Horizontal distance to target in meters
-
-        Returns:
-            Recommended pitch angle in radians (negative = down)
-        """
-        # Base pitch based on height zone
-        if target_z > 0.30:
-            # High targets - use gentle downward pitch
-            base_pitch = math.radians(-20)
-            pitch_range = math.radians(10)  # Can vary -10 to -30
-        elif target_z > 0.20:
-            # Mid-height targets
-            base_pitch = math.radians(-35)
-            pitch_range = math.radians(12)  # Can vary -23 to -47
-        elif target_z > 0.10:
-            # Low targets
-            base_pitch = math.radians(-45)
-            pitch_range = math.radians(15)  # Can vary -30 to -60
-        else:
-            # Table level targets
-            base_pitch = math.radians(-60)
-            pitch_range = math.radians(15)  # Can vary -45 to -75
-
-        # Adjust for reach - extended reaches require less steep pitch
-        # Max useful reach is about 0.4m for VX300S
-        reach_factor = min(distance_xy / 0.4, 1.0)  # 0-1 normalized
-
-        # Extended reach = less steep (toward 0), close reach = can be steeper
-        pitch = base_pitch + (reach_factor * pitch_range)
-
-        return pitch
-
-    def _calculate_task_aware_orientation(
+    def _calculate_default_orientation(
         self,
         pos: Dict[str, float],
-        task_hint: Optional[str] = None
+        pitch_degrees: Optional[float] = None
     ) -> List[float]:
         """
-        Calculate orientation based on task type.
-
-        Task hints:
-        - 'grasp_from_above': Steep downward pitch for picking
-        - 'place_down': Same as grasp_from_above
-        - 'reach_horizontal': Gentle pitch for general reaching
-        - None: Auto-detect based on z-height (low z = grasp, high z = reach)
+        Calculate orientation for end effector.
 
         Args:
             pos: Target position dict with x, y, z in meters
-            task_hint: Optional task type hint
+            pitch_degrees: Explicit pitch in degrees (negative = down).
+                          If None, uses a simple default of -30°.
 
         Returns:
             [roll, pitch, yaw] orientation in radians
         """
-        distance_xy = math.sqrt(pos['x']**2 + pos['y']**2)
-
-        # Auto-detect task from z-height if no hint provided
-        if task_hint is None:
-            if pos['z'] < 0.15:
-                task_hint = 'grasp_from_above'
-            elif pos['z'] > 0.35:
-                task_hint = 'reach_horizontal'
-            else:
-                task_hint = 'grasp_from_above'  # Default to grasping for mid-height
-
         # Calculate yaw (direction to target)
         yaw = math.atan2(pos['y'], pos['x'])
 
-        if task_hint in ['grasp_from_above', 'place_down']:
-            # GRASPING ORIENTATION: Steep downward pitch
-            base_pitch = self._calculate_achievable_pitch(pos['z'], distance_xy)
-
-            # Enforce minimum steepness based on height
-            if pos['z'] < 0.10:
-                min_pitch = math.radians(-60)
-            elif pos['z'] < 0.20:
-                min_pitch = math.radians(-50)
-            else:
-                min_pitch = math.radians(-40)
-
-            # Use the steeper of base_pitch or min_pitch (more negative = steeper)
-            pitch = min(base_pitch, min_pitch)
+        # Use explicit pitch if provided, otherwise default to -30°
+        # Note: Sign is negated to match robot's coordinate convention
+        # User says -45 (down) -> we use +45 in IK -> gripper points down
+        if pitch_degrees is not None:
+            pitch = math.radians(-pitch_degrees)
         else:
-            # REACHING ORIENTATION: Use standard height-based calculation
-            pitch = self._calculate_achievable_pitch(pos['z'], distance_xy)
+            # Simple default: -30° downward pitch for manipulation
+            # (negated: user convention -30 -> IK convention +30)
+            pitch = math.radians(30)
 
         return [0.0, pitch, yaw]
 
@@ -854,7 +784,7 @@ class ArmController:
     def move_to_position(self,
                         position: Union[List[float], Dict[str, float]],
                         orientation: Optional[List[float]] = None,
-                        task_hint: Optional[str] = None,
+                        pitch_degrees: Optional[float] = None,
                         format: str = 'auto',
                         moving_time: Optional[float] = None,
                         blocking: bool = True) -> Dict:
@@ -863,12 +793,9 @@ class ArmController:
 
         Args:
             position: Target position (x,y,z) or (y,x)
-            orientation: Optional (roll, pitch, yaw) in radians
-            task_hint: Task type for auto-orientation:
-                - 'grasp_from_above': Steep downward pitch for picking
-                - 'place_down': Same as grasp_from_above
-                - 'reach_horizontal': Gentle pitch for general reaching
-                - None: Auto-detect based on z-height
+            orientation: Optional (roll, pitch, yaw) in radians (overrides pitch_degrees)
+            pitch_degrees: Gripper pitch in degrees (negative = down, e.g., -45 for steep down).
+                          Ignored if orientation is provided. Default is -30°.
             format: Position format ('auto', 'xyz', 'yx')
             moving_time: Time to complete movement
             blocking: Wait for movement to complete
@@ -898,11 +825,11 @@ class ArmController:
                     "message": "Dry run - movement not executed"
                 }
 
-            # Default orientation if not provided - calculate based on task type
+            # Default orientation if not provided - use explicit pitch or default
             if orientation is None:
-                orientation = self._calculate_task_aware_orientation(pos, task_hint)
-                task_desc = task_hint or 'auto-detected'
-                print(f"[ArmController] Auto-orientation ({task_desc}): "
+                orientation = self._calculate_default_orientation(pos, pitch_degrees)
+                pitch_desc = f"{pitch_degrees}°" if pitch_degrees is not None else "default -30°"
+                print(f"[ArmController] Auto-orientation (pitch={pitch_desc}): "
                       f"pitch={math.degrees(orientation[1]):.1f}°, yaw={math.degrees(orientation[2]):.1f}°")
             
             with self.state_lock:
