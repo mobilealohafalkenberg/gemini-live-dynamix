@@ -437,6 +437,61 @@ class ArmController:
 
         return pitch
 
+    def _calculate_task_aware_orientation(
+        self,
+        pos: Dict[str, float],
+        task_hint: Optional[str] = None
+    ) -> List[float]:
+        """
+        Calculate orientation based on task type.
+
+        Task hints:
+        - 'grasp_from_above': Steep downward pitch for picking
+        - 'place_down': Same as grasp_from_above
+        - 'reach_horizontal': Gentle pitch for general reaching
+        - None: Auto-detect based on z-height (low z = grasp, high z = reach)
+
+        Args:
+            pos: Target position dict with x, y, z in meters
+            task_hint: Optional task type hint
+
+        Returns:
+            [roll, pitch, yaw] orientation in radians
+        """
+        distance_xy = math.sqrt(pos['x']**2 + pos['y']**2)
+
+        # Auto-detect task from z-height if no hint provided
+        if task_hint is None:
+            if pos['z'] < 0.15:
+                task_hint = 'grasp_from_above'
+            elif pos['z'] > 0.35:
+                task_hint = 'reach_horizontal'
+            else:
+                task_hint = 'grasp_from_above'  # Default to grasping for mid-height
+
+        # Calculate yaw (direction to target)
+        yaw = math.atan2(pos['y'], pos['x'])
+
+        if task_hint in ['grasp_from_above', 'place_down']:
+            # GRASPING ORIENTATION: Steep downward pitch
+            base_pitch = self._calculate_achievable_pitch(pos['z'], distance_xy)
+
+            # Enforce minimum steepness based on height
+            if pos['z'] < 0.10:
+                min_pitch = math.radians(-60)
+            elif pos['z'] < 0.20:
+                min_pitch = math.radians(-50)
+            else:
+                min_pitch = math.radians(-40)
+
+            # Use the steeper of base_pitch or min_pitch (more negative = steeper)
+            pitch = min(base_pitch, min_pitch)
+        else:
+            # REACHING ORIENTATION: Use standard height-based calculation
+            pitch = self._calculate_achievable_pitch(pos['z'], distance_xy)
+
+        return [0.0, pitch, yaw]
+
     def _score_ik_solution(self, solution: List[float], current_joints: List[float]) -> float:
         """
         Score an IK solution (lower is better).
@@ -799,19 +854,25 @@ class ArmController:
     def move_to_position(self,
                         position: Union[List[float], Dict[str, float]],
                         orientation: Optional[List[float]] = None,
+                        task_hint: Optional[str] = None,
                         format: str = 'auto',
                         moving_time: Optional[float] = None,
                         blocking: bool = True) -> Dict:
         """
         Move end effector to Cartesian position.
-        
+
         Args:
             position: Target position (x,y,z) or (y,x)
             orientation: Optional (roll, pitch, yaw) in radians
+            task_hint: Task type for auto-orientation:
+                - 'grasp_from_above': Steep downward pitch for picking
+                - 'place_down': Same as grasp_from_above
+                - 'reach_horizontal': Gentle pitch for general reaching
+                - None: Auto-detect based on z-height
             format: Position format ('auto', 'xyz', 'yx')
             moving_time: Time to complete movement
             blocking: Wait for movement to complete
-            
+
         Returns:
             Status dictionary
         """
@@ -837,19 +898,12 @@ class ArmController:
                     "message": "Dry run - movement not executed"
                 }
 
-            # Default orientation if not provided - auto-calculate pitch and yaw
+            # Default orientation if not provided - calculate based on task type
             if orientation is None:
-                # Yaw: face toward target position
-                yaw = math.atan2(pos['y'], pos['x'])
-
-                # Distance to target in XY plane
-                distance_xy = math.sqrt(pos['x']**2 + pos['y']**2)
-
-                # Calculate achievable pitch based on Z height and reach
-                pitch = self._calculate_achievable_pitch(pos['z'], distance_xy)
-
-                orientation = [0.0, pitch, yaw]
-                print(f"[ArmController] Auto-orientation: pitch={math.degrees(pitch):.1f}°, yaw={math.degrees(yaw):.1f}°")
+                orientation = self._calculate_task_aware_orientation(pos, task_hint)
+                task_desc = task_hint or 'auto-detected'
+                print(f"[ArmController] Auto-orientation ({task_desc}): "
+                      f"pitch={math.degrees(orientation[1]):.1f}°, yaw={math.degrees(orientation[2]):.1f}°")
             
             with self.state_lock:
                 self.current_state = ArmState.MOVING

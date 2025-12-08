@@ -262,7 +262,11 @@ def build_tool_declarations(connected_arms: List[str]) -> types.Tool:
                         "orientation": types.Schema(
                             type=types.Type.ARRAY,
                             items=types.Schema(type=types.Type.NUMBER),
-                            description="Optional [roll, pitch, yaw] in radians. Achievable pitch depends on height: high targets (-0.17 to -0.52 rad), table-level (-0.78 to -1.31 rad). If not provided, auto-calculates achievable downward pitch. If requested pitch is not achievable, system relaxes to nearest achievable angle."
+                            description="Optional [roll, pitch, yaw] in radians. If not provided, auto-calculates based on task_hint."
+                        ),
+                        "task_hint": types.Schema(
+                            type=types.Type.STRING,
+                            description="Task type for auto-orientation: 'grasp_from_above' (steep downward pitch for picking), 'place_down' (same as grasp), 'reach_horizontal' (gentle pitch for reaching). If omitted, auto-detects from z-height."
                         ),
                         "moving_time": types.Schema(
                             type=types.Type.NUMBER,
@@ -327,6 +331,49 @@ def build_tool_declarations(connected_arms: List[str]) -> types.Tool:
                     },
                     required=["arm_id"]
                 )
+            ),
+
+            # execute_trajectory - Multi-waypoint manipulation sequences
+            types.FunctionDeclaration(
+                name="execute_trajectory",
+                description="Execute a multi-waypoint trajectory with optional gripper coordination. Use for pick-and-place sequences: approach (move above), grasp (lower + close gripper), lift (raise with object).",
+                parameters=types.Schema(
+                    type=types.Type.OBJECT,
+                    properties={
+                        "arm_id": types.Schema(
+                            type=types.Type.STRING,
+                            description=arm_enum_desc
+                        ),
+                        "waypoints": types.Schema(
+                            type=types.Type.ARRAY,
+                            items=types.Schema(
+                                type=types.Type.OBJECT,
+                                properties={
+                                    "point": types.Schema(
+                                        type=types.Type.ARRAY,
+                                        items=types.Schema(type=types.Type.NUMBER),
+                                        description="Target [x, y, z] position in meters"
+                                    ),
+                                    "label": types.Schema(
+                                        type=types.Type.STRING,
+                                        description="Descriptive name (e.g., 'approach', 'grasp', 'lift')"
+                                    ),
+                                    "gripper_action": types.Schema(
+                                        type=types.Type.STRING,
+                                        description="Optional: 'open', 'close', or omit to maintain current state"
+                                    )
+                                },
+                                required=["point", "label"]
+                            ),
+                            description="Ordered list of waypoints to execute"
+                        ),
+                        "speed": types.Schema(
+                            type=types.Type.STRING,
+                            description="Movement speed: 'slow' (2.5s per waypoint), 'medium' (1.5s), 'fast' (0.8s). Default: 'slow'"
+                        )
+                    },
+                    required=["arm_id", "waypoints"]
+                )
             )
         ]
     )
@@ -334,17 +381,20 @@ def build_tool_declarations(connected_arms: List[str]) -> types.Tool:
 
 # --- TOOL EXECUTION FUNCTIONS ---
 
-def execute_move_arm(arm_id: str, position: List[float], orientation: Optional[List[float]] = None, moving_time: float = 1.5) -> Dict[str, Any]:
+def execute_move_arm(arm_id: str, position: List[float], orientation: Optional[List[float]] = None, task_hint: Optional[str] = None, moving_time: float = 1.5) -> Dict[str, Any]:
     """Execute move_arm tool.
 
     Args:
         arm_id: Which arm (follower_right, follower_left)
         position: [x, y, z] in meters
         orientation: Optional [roll, pitch, yaw] in radians. If None, auto-calculates.
+        task_hint: Task type for auto-orientation ('grasp_from_above', 'place_down', 'reach_horizontal')
         moving_time: Movement duration in seconds
     """
     if orientation:
         print(f"[Robot] Moving {arm_id} to {position} with orientation {orientation}")
+    elif task_hint:
+        print(f"[Robot] Moving {arm_id} to {position} (task_hint: {task_hint})")
     else:
         print(f"[Robot] Moving {arm_id} to {position} (auto-orientation)")
 
@@ -353,7 +403,7 @@ def execute_move_arm(arm_id: str, position: List[float], orientation: Optional[L
 
     try:
         arm = arm_controllers[arm_id]['arm']
-        result = arm.move_to_position(position, orientation=orientation, moving_time=moving_time, blocking=True)
+        result = arm.move_to_position(position, orientation=orientation, task_hint=task_hint, moving_time=moving_time, blocking=True)
         if result.get('success'):
             state = arm.get_arm_state()
             response = {
@@ -450,6 +500,56 @@ def execute_resume_after_stop(arm_id: str) -> Dict[str, Any]:
         return {"status": "error", "error": str(e)}
 
 
+def execute_trajectory(arm_id: str, waypoints: List[Dict], speed: str = 'slow') -> Dict[str, Any]:
+    """Execute multi-waypoint trajectory with gripper coordination.
+
+    Args:
+        arm_id: Which arm (follower_right, follower_left)
+        waypoints: List of waypoint dicts with 'point', 'label', optional 'gripper_action'
+        speed: 'slow' (2.5s), 'medium' (1.5s), or 'fast' (0.8s) per waypoint
+    """
+    print(f"[Robot] Executing trajectory on {arm_id}: {len(waypoints)} waypoints at {speed} speed")
+
+    if arm_id not in arm_controllers:
+        return {"status": "error", "error": f"Arm '{arm_id}' not found. Available: {list(arm_controllers.keys())}"}
+
+    if not waypoints:
+        return {"status": "error", "error": "No waypoints provided"}
+
+    # Validate waypoints
+    for i, wp in enumerate(waypoints):
+        if 'point' not in wp:
+            return {"status": "error", "error": f"Waypoint {i} missing 'point' field"}
+        if not isinstance(wp['point'], list) or len(wp['point']) != 3:
+            return {"status": "error", "error": f"Waypoint {i} 'point' must be [x, y, z]"}
+
+    try:
+        arm = arm_controllers[arm_id]['arm']
+        gripper = arm_controllers[arm_id]['gripper']
+
+        result = arm.execute_trajectory(
+            waypoints=waypoints,
+            speed=speed,
+            coordinate_with_gripper=gripper,
+            blocking=True
+        )
+
+        if result.get('success'):
+            return {
+                "status": "success",
+                "waypoints_completed": result.get('total_waypoints', len(waypoints)),
+                "message": "Trajectory complete. Verify in camera images."
+            }
+        else:
+            return {
+                "status": "partial",
+                "waypoints_completed": len(result.get('waypoints_completed', [])),
+                "error": result.get('error', 'Trajectory incomplete')
+            }
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
 def build_system_instruction(connected_arms: List[str]) -> str:
     """Build lean system instruction - SDK provides tool docs via schemas."""
     arm_list = ', '.join(connected_arms)
@@ -461,21 +561,27 @@ Use the appropriate arm_id from the available arms for all function calls.
 
 COORDINATE SYSTEM (meters, relative to robot base):
 +X: Forward | +Y: Left | -Y: Right | +Z: Up
+Typical workspace: X: 0.15-0.50m, Y: -0.30 to +0.30m, Z: 0.02-0.40m
 
-ORIENTATION GUIDANCE:
-Achievable pitch angles depend on target height:
-- High positions (z > 0.30m): pitch -10° to -30°
-- Mid positions (z = 0.20-0.30m): pitch -20° to -45°
-- Low positions (z = 0.10-0.20m): pitch -30° to -60°
-- Table level (z < 0.10m): pitch -45° to -75°
+TASK HINTS FOR ORIENTATION:
+When calling move_arm, use task_hint to get optimal gripper orientation:
+- 'grasp_from_above': Gripper points steeply DOWN for picking objects
+- 'place_down': Same as grasp_from_above, for placing objects
+- 'reach_horizontal': Gripper faces forward (for general reaching)
+If task_hint is omitted, orientation auto-detects based on target height.
 
-IMPORTANT: pitch=-90° (straight down) is only achievable at very low Z with arm extended forward.
-If you don't specify orientation, the system auto-calculates an achievable downward pitch.
-If your requested pitch is not achievable, the system will relax to the nearest achievable angle.
+TRAJECTORY TOOL FOR PICK-AND-PLACE:
+For pick-and-place sequences, use execute_trajectory instead of multiple move_arm calls.
+Example pick sequence:
+  waypoints: [
+    {{"point": [x, y, z+0.10], "label": "approach"}},
+    {{"point": [x, y, z], "label": "grasp", "gripper_action": "close"}},
+    {{"point": [x, y, z+0.15], "label": "lift"}}
+  ]
 
 CAMERAS:
-- Gripper cameras (left_gripper, right_gripper) are mounted on their respective arm's gripper
-- Overhead camera provides a bird's-eye view of the workspace
+- Gripper cameras (left_gripper, right_gripper) are on respective arm grippers
+- Overhead camera provides bird's-eye view of workspace
 
 EXECUTION PROTOCOL:
 1. After EVERY action, examine NEW camera images to verify result
@@ -692,6 +798,7 @@ class RobotSession:
                     args.get('arm_id'),
                     args.get('position'),
                     args.get('orientation'),  # None if not provided
+                    args.get('task_hint'),    # None if not provided
                     args.get('moving_time', 1.5)
                 )
             elif name == "control_gripper":
@@ -706,6 +813,13 @@ class RobotSession:
                 return await asyncio.to_thread(
                     execute_resume_after_stop,
                     args.get('arm_id')
+                )
+            elif name == "execute_trajectory":
+                return await asyncio.to_thread(
+                    execute_trajectory,
+                    args.get('arm_id'),
+                    args.get('waypoints', []),
+                    args.get('speed', 'slow')
                 )
             else:
                 return {"status": "error", "error": f"Unknown tool: {name}"}
