@@ -391,10 +391,6 @@ def build_tool_declarations(connected_arms: List[str]) -> types.Tool:
                             ),
                             description="Ordered list of waypoints. Set checkpoint=true before critical actions (e.g., before grasping) to verify position."
                         ),
-                        "speed": types.Schema(
-                            type=types.Type.STRING,
-                            description="Movement speed: 'slow' (2.5s per waypoint), 'medium' (1.5s), 'fast' (0.8s). Default: 'slow'"
-                        )
                     },
                     required=["arm_id", "waypoints"]
                 )
@@ -629,19 +625,18 @@ def execute_get_arm_state(arm_id: str) -> Dict[str, Any]:
         return {"status": "error", "error": str(e)}
 
 
-def execute_trajectory(arm_id: str, waypoints: List[Dict], speed: str = 'slow') -> Dict[str, Any]:
+def execute_trajectory(arm_id: str, waypoints: List[Dict]) -> Dict[str, Any]:
     """Execute multi-waypoint trajectory with gripper coordination and checkpoint support.
 
     Args:
         arm_id: Which arm (follower_right, follower_left)
         waypoints: List of waypoint dicts with 'point', 'label', optional 'gripper_position'/'gripper_action', optional 'checkpoint'
-        speed: 'slow' (2.5s), 'medium' (1.5s), or 'fast' (0.8s) per waypoint
 
     Returns:
         If checkpoint hit: returns status='checkpoint' with trajectory_id and current position
         If completed: returns status='success' or 'failed'
     """
-    print(f"[Robot] Executing trajectory on {arm_id}: {len(waypoints)} waypoints at {speed} speed")
+    print(f"[Robot] Executing trajectory on {arm_id}: {len(waypoints)} waypoints")
 
     if arm_id not in arm_controllers:
         return {"status": "error", "error": f"Arm '{arm_id}' not found. Available: {list(arm_controllers.keys())}"}
@@ -649,8 +644,12 @@ def execute_trajectory(arm_id: str, waypoints: List[Dict], speed: str = 'slow') 
     if not waypoints:
         return {"status": "error", "error": "No waypoints provided"}
 
-    # Validate waypoints
+    # Validate waypoints - must be dicts, not strings
     for i, wp in enumerate(waypoints):
+        if isinstance(wp, str):
+            return {"status": "error", "error": f"Waypoint {i} is a string instead of an object. Each waypoint must be a JSON object like {{\"point\": [x, y, z], \"label\": \"name\"}}. Received: {wp[:80]}..."}
+        if not isinstance(wp, dict):
+            return {"status": "error", "error": f"Waypoint {i} must be an object, got {type(wp).__name__}"}
         if 'point' not in wp:
             return {"status": "error", "error": f"Waypoint {i} missing 'point' field"}
         if not isinstance(wp['point'], list) or len(wp['point']) != 3:
@@ -662,7 +661,6 @@ def execute_trajectory(arm_id: str, waypoints: List[Dict], speed: str = 'slow') 
 
         result = arm.execute_trajectory(
             waypoints=waypoints,
-            speed=speed,
             coordinate_with_gripper=gripper,
             blocking=True
         )
@@ -868,12 +866,14 @@ If pitch_degrees is omitted, defaults to -30°. Yaw auto-calculates to face targ
 TRAJECTORY TOOL WITH VISUAL CHECKPOINTS:
 For pick-and-place, use execute_trajectory with checkpoints for visual verification.
 
-Example pick sequence with checkpoint before grasp:
+IMPORTANT: waypoints must be JSON objects (NOT strings). Each waypoint is an object with properties.
+
+Example pick sequence (note: each waypoint is a JSON object, not a string):
   waypoints: [
-    {{"point": [x, y, z+0.10], "label": "approach", "gripper_position": 1.0}},
-    {{"point": [x, y, z+0.02], "label": "pre-grasp", "gripper_position": 0.8, "checkpoint": true}},
-    {{"point": [x, y, z], "label": "grasp", "gripper_position": 0.3}},
-    {{"point": [x, y, z+0.15], "label": "lift", "gripper_position": 0.3}}
+    {{"point": [0.35, 0.15, 0.25], "label": "approach", "gripper_position": 1.0}},
+    {{"point": [0.35, 0.15, 0.17], "label": "pre-grasp", "gripper_position": 0.8, "checkpoint": true}},
+    {{"point": [0.35, 0.15, 0.15], "label": "grasp", "gripper_position": 0.3}},
+    {{"point": [0.35, 0.15, 0.25], "label": "lift", "gripper_position": 0.3}}
   ]
 
 CHECKPOINT WORKFLOW:
@@ -1150,8 +1150,7 @@ class RobotSession:
                 return await asyncio.to_thread(
                     execute_trajectory,
                     args.get('arm_id'),
-                    args.get('waypoints', []),
-                    args.get('speed', 'slow')
+                    args.get('waypoints', [])
                 )
             elif name == "continue_trajectory":
                 return await asyncio.to_thread(

@@ -111,7 +111,7 @@ class ArmController:
         self.cancel_flags = {}  # trajectory_id -> threading.Event for cancellation
 
         # Paused trajectories for checkpoint-based execution
-        # trajectory_id -> {remaining_waypoints, speed, gripper_controller, current_position}
+        # trajectory_id -> {remaining_waypoints, gripper_controller, current_position}
         self.paused_trajectories = {}
         
     def initialize(self) -> bool:
@@ -1087,7 +1087,7 @@ class ArmController:
             traceback.print_exc()
             return False
 
-    def execute_trajectory(self, waypoints: List[Dict], speed: str = 'slow', coordinate_with_gripper=None, blocking: bool = True) -> Dict:
+    def execute_trajectory(self, waypoints: List[Dict], coordinate_with_gripper=None, blocking: bool = True) -> Dict:
         """
         Execute a multi-waypoint trajectory with optional gripper coordination.
 
@@ -1096,7 +1096,6 @@ class ArmController:
                 - 'point': [x,y,z] position or [y,x] normalized
                 - 'label': descriptive name for waypoint
                 - 'gripper_action': optional 'open', 'close', or 'maintain'
-            speed: 'slow', 'medium', or 'fast'
             coordinate_with_gripper: Optional gripper controller for coordinated actions
             blocking: If True, wait for trajectory completion. If False, return immediately with trajectory_id
 
@@ -1120,7 +1119,6 @@ class ArmController:
                 self.active_trajectories[trajectory_id] = {
                     'status': TrajectoryStatus.RUNNING,
                     'waypoints': waypoints,
-                    'speed': speed,
                     'progress': 0,
                     'current_waypoint': 0,
                     'total_waypoints': len(waypoints),
@@ -1134,7 +1132,7 @@ class ArmController:
             # Start trajectory in background thread
             thread = threading.Thread(
                 target=self._execute_trajectory_async,
-                args=(trajectory_id, waypoints, speed, coordinate_with_gripper),
+                args=(trajectory_id, waypoints, coordinate_with_gripper),
                 daemon=True
             )
             thread.start()
@@ -1149,15 +1147,14 @@ class ArmController:
             }
 
         # Blocking mode - execute synchronously
-        return self._execute_trajectory_sync(waypoints, speed, coordinate_with_gripper)
+        return self._execute_trajectory_sync(waypoints, coordinate_with_gripper)
 
-    def _execute_trajectory_sync(self, waypoints: List[Dict], speed: str, coordinate_with_gripper=None,
+    def _execute_trajectory_sync(self, waypoints: List[Dict], coordinate_with_gripper=None,
                                    trajectory_id: Optional[str] = None, start_index: int = 0) -> Dict:
         """Execute trajectory synchronously (blocking mode) with checkpoint support.
 
         Args:
             waypoints: List of waypoint dicts with point, label, gripper_position/gripper_action, checkpoint
-            speed: 'slow', 'medium', or 'fast'
             coordinate_with_gripper: Optional gripper controller
             trajectory_id: Optional ID for checkpoint-based resumption
             start_index: Starting waypoint index (for resumed trajectories)
@@ -1165,9 +1162,8 @@ class ArmController:
         Returns:
             Dict with execution results. If checkpoint hit, returns status='checkpoint' with trajectory state.
         """
-        # Map speed to moving_time
-        speed_map = {'slow': 2.5, 'medium': 1.5, 'fast': 0.8}
-        moving_time = speed_map.get(speed, 1.5)
+        # Use default moving time
+        moving_time = self.default_moving_time
 
         # Generate trajectory ID if not provided
         if trajectory_id is None:
@@ -1176,7 +1172,7 @@ class ArmController:
         waypoint_results = []
         overall_success = True
 
-        print(f"[ArmController] Starting trajectory {trajectory_id} with {len(waypoints)} waypoints at {speed} speed")
+        print(f"[ArmController] Starting trajectory {trajectory_id} with {len(waypoints)} waypoints")
 
         for i, waypoint in enumerate(waypoints[start_index:], start=start_index):
             point = waypoint.get('point', [])
@@ -1244,7 +1240,6 @@ class ArmController:
                 # Store paused state for later resumption
                 self.paused_trajectories[trajectory_id] = {
                     'remaining_waypoints': remaining_waypoints,
-                    'speed': speed,
                     'gripper_controller': coordinate_with_gripper,
                     'waypoints_completed': waypoint_results,
                     'current_waypoint_index': i,
@@ -1281,18 +1276,17 @@ class ArmController:
             'final_state': self.get_arm_state()
         }
 
-    def _execute_trajectory_async(self, trajectory_id: str, waypoints: List[Dict], speed: str, coordinate_with_gripper=None):
+    def _execute_trajectory_async(self, trajectory_id: str, waypoints: List[Dict], coordinate_with_gripper=None):
         """Execute trajectory asynchronously in background thread"""
         try:
-            # Map speed to moving_time
-            speed_map = {'slow': 2.5, 'medium': 1.5, 'fast': 0.8}
-            moving_time = speed_map.get(speed, 1.5)
+            # Use default moving time
+            moving_time = self.default_moving_time
 
             waypoint_results = []
             overall_success = True
             cancel_event = self.cancel_flags.get(trajectory_id)
 
-            print(f"[ArmController] Executing trajectory {trajectory_id} with {len(waypoints)} waypoints at {speed} speed")
+            print(f"[ArmController] Executing trajectory {trajectory_id} with {len(waypoints)} waypoints")
 
             for i, waypoint in enumerate(waypoints):
                 # Check for cancellation
@@ -1503,7 +1497,6 @@ class ArmController:
 
         paused = self.paused_trajectories[trajectory_id]
         remaining = paused['remaining_waypoints']
-        speed = paused['speed']
         gripper = paused['gripper_controller']
         completed_so_far = paused['waypoints_completed']
 
@@ -1515,7 +1508,6 @@ class ArmController:
         # Continue execution with remaining waypoints
         result = self._execute_trajectory_sync(
             waypoints=remaining,
-            speed=speed,
             coordinate_with_gripper=gripper,
             trajectory_id=trajectory_id,
             start_index=0  # Start from beginning of remaining waypoints
@@ -1549,7 +1541,6 @@ class ArmController:
 
         paused = self.paused_trajectories[trajectory_id]
         remaining = paused['remaining_waypoints']
-        speed = paused['speed']
         gripper = paused['gripper_controller']
         completed_so_far = paused['waypoints_completed']
 
@@ -1583,7 +1574,6 @@ class ArmController:
         # Continue execution with adjusted waypoints
         result = self._execute_trajectory_sync(
             waypoints=remaining,
-            speed=speed,
             coordinate_with_gripper=gripper,
             trajectory_id=trajectory_id,
             start_index=0
