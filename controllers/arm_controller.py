@@ -261,6 +261,83 @@ class ArmController:
 
         return True, ""
 
+    def _get_joint_limits(self) -> List[Tuple[float, float]]:
+        """
+        Get joint limits for all 6 joints.
+
+        Uses per-arm calibrated limits from DynamixelController if available,
+        falls back to VX300S model's generic limits.
+
+        Returns:
+            List of 6 tuples [(min_rad, max_rad), ...] for each joint
+        """
+        limits = []
+        calibrated_limits = None
+
+        if self.dxl is not None:
+            try:
+                calibrated_limits = self.dxl.get_calibrated_limits_radians()
+            except AttributeError:
+                calibrated_limits = None
+
+        for i in range(6):
+            if calibrated_limits and calibrated_limits[i] is not None:
+                limits.append(calibrated_limits[i])
+            else:
+                limits.append(self.model.joint_limits[i])
+
+        return limits
+
+    def _generate_calibrated_guesses(self, current_joints: List[float]) -> List[List[float]]:
+        """
+        Generate IK initial guesses based on calibrated joint limits.
+
+        Creates 4 guesses that explore the valid solution space:
+        1. Current position (for smooth motion)
+        2. Center of joint ranges (neutral pose)
+        3. Positive waist bias (for targets to the left)
+        4. Negative waist bias (for targets to the right)
+
+        Args:
+            current_joints: Current joint positions in radians
+
+        Returns:
+            List of 4 joint angle guesses, each a list of 6 floats
+        """
+        limits = self._get_joint_limits()
+
+        # Calculate center and biased positions for waist (joint 0)
+        waist_min, waist_max = limits[0]
+        waist_center = (waist_min + waist_max) / 2
+        waist_range = waist_max - waist_min
+
+        # Bias at 70% toward each limit (not at the limit itself)
+        waist_positive = waist_center + 0.35 * waist_range  # Toward max
+        waist_negative = waist_center - 0.35 * waist_range  # Toward min
+
+        # Calculate center positions for other joints
+        joint_centers = []
+        for i in range(6):
+            j_min, j_max = limits[i]
+            joint_centers.append((j_min + j_max) / 2)
+
+        # Build guesses
+        guesses = [
+            # 1. Current position (smoothest motion)
+            list(current_joints),
+
+            # 2. Center of all joint ranges (neutral pose)
+            joint_centers.copy(),
+
+            # 3. Positive waist bias (for targets to the left of robot)
+            [waist_positive] + joint_centers[1:],
+
+            # 4. Negative waist bias (for targets to the right of robot)
+            [waist_negative] + joint_centers[1:],
+        ]
+
+        return guesses
+
     def _normalize_continuous_joints(self, joints: List[float]) -> List[float]:
         """
         Normalize continuous joints (waist, forearm_roll, wrist_rotate) to [-π, π].
@@ -281,7 +358,10 @@ class ArmController:
 
     def _check_joint_limits(self, joints: List[float]) -> bool:
         """
-        Check if all joints are within model limits.
+        Check if all joints are within limits.
+
+        Uses per-arm calibrated limits from DynamixelController if available,
+        falls back to VX300S model's generic limits.
 
         Args:
             joints: List of 6 joint angles in radians
@@ -289,8 +369,27 @@ class ArmController:
         Returns:
             True if all joints within limits, False otherwise
         """
-        is_valid, _ = self.model.validate_joint_angles(np.array(joints))
-        return is_valid
+        # Try to get per-arm calibrated limits from DynamixelController
+        calibrated_limits = None
+        if self.dxl is not None:
+            try:
+                calibrated_limits = self.dxl.get_calibrated_limits_radians()
+            except AttributeError:
+                # DynamixelController doesn't have the method (older version)
+                calibrated_limits = None
+
+        for i, angle in enumerate(joints):
+            if calibrated_limits and calibrated_limits[i] is not None:
+                # Use per-arm calibrated limits
+                min_rad, max_rad = calibrated_limits[i]
+            else:
+                # Fall back to model limits for this joint
+                min_rad, max_rad = self.model.joint_limits[i]
+
+            if angle < min_rad or angle > max_rad:
+                return False
+
+        return True
 
     def _score_ik_solution(self, solution: List[float], current_joints: List[float]) -> float:
         """
@@ -331,10 +430,10 @@ class ArmController:
         custom_guess: Optional[List[float]] = None
     ) -> Tuple[Optional[List[float]], bool]:
         """
-        Compute IK with multiple initial guesses, prefer front-facing configuration.
+        Compute IK with multiple initial guesses, prefer natural arm configuration.
 
-        Strategy: Try 4 different initial guesses to explore solution space,
-        then select the solution that keeps the arm in a natural configuration.
+        Strategy: Try 4 different initial guesses based on calibrated joint limits
+        to explore the valid solution space, then select the best solution.
 
         Args:
             T_target: 4x4 homogeneous transformation matrix for target pose
@@ -347,12 +446,8 @@ class ArmController:
         if custom_guess is not None:
             guesses = [custom_guess]
         else:
-            guesses = [
-                list(current_joints),                        # Current position (smoothest motion)
-                [0.0] * 6,                                   # Home (front-facing)
-                [math.radians(-120)] + [0.0] * 5,           # Left-biased waist
-                [math.radians(120)] + [0.0] * 5,            # Right-biased waist
-            ]
+            # Generate guesses based on calibrated joint limits
+            guesses = self._generate_calibrated_guesses(current_joints)
 
         valid_solutions = []
 
@@ -1447,142 +1542,3 @@ class ArmController:
         """Cleanup on deletion"""
         if self.initialized:
             self.shutdown()
-
-
-# Convenience functions for simple usage
-_global_controller = None
-
-def get_controller() -> ArmController:
-    """
-    Get or create global controller instance.
-
-    .. deprecated:: 1.9
-        The global controller singleton pattern is deprecated and will be removed in version 2.0.
-        Instead, create and manage controller instances explicitly:
-
-        Example:
-            # Old (deprecated):
-            controller = get_controller()
-
-            # New (recommended):
-            controller = ArmController(robot_name='vx300s', group_name='arm')
-            controller.initialize()
-
-    Returns:
-        ArmController: The global controller instance
-    """
-    import warnings
-    warnings.warn(
-        "get_controller() is deprecated and will be removed in version 2.0. "
-        "Create controller instances explicitly: controller = ArmController(robot_name='vx300s', group_name='arm'); controller.initialize()",
-        DeprecationWarning,
-        stacklevel=2
-    )
-    global _global_controller
-    if _global_controller is None:
-        _global_controller = ArmController()
-        _global_controller.initialize()
-    return _global_controller
-
-def move_arm(position=None, joints=None, pose=None, **kwargs) -> Dict:
-    """
-    Simple function to move arm using global controller.
-
-    .. deprecated:: 1.9
-        The global controller singleton pattern is deprecated and will be removed in version 2.0.
-        Instead, create and manage controller instances explicitly:
-
-        Example:
-            # Old (deprecated):
-            move_arm(position=[0.3, 0.0, 0.2])
-
-            # New (recommended):
-            controller = ArmController(robot_name='vx300s', group_name='arm')
-            controller.initialize()
-            controller.move_to_position([0.3, 0.0, 0.2])
-
-    Args:
-        position: Target position [x, y, z]
-        joints: Target joint angles
-        pose: Named pose ('home', 'ready', 'sleep')
-        **kwargs: Additional arguments passed to movement methods
-
-    Returns:
-        Dict: Movement result
-    """
-    import warnings
-    warnings.warn(
-        "move_arm() is deprecated and will be removed in version 2.0. "
-        "Create controller instances explicitly and call movement methods directly.",
-        DeprecationWarning,
-        stacklevel=2
-    )
-    controller = get_controller()
-
-    if pose is not None:
-        return controller.move_to_pose(pose, **kwargs)
-    elif joints is not None:
-        return controller.move_joints(joints, **kwargs)
-    elif position is not None:
-        return controller.move_to_position(position, **kwargs)
-    else:
-        return {"success": False, "error": "No target specified"}
-
-def get_arm_state() -> Dict:
-    """
-    Simple function to get arm state from global controller.
-
-    .. deprecated:: 1.9
-        The global controller singleton pattern is deprecated and will be removed in version 2.0.
-        Instead, create and manage controller instances explicitly:
-
-        Example:
-            # Old (deprecated):
-            state = get_arm_state()
-
-            # New (recommended):
-            controller = ArmController(robot_name='vx300s', group_name='arm')
-            controller.initialize()
-            state = controller.get_arm_state()
-
-    Returns:
-        Dict: Current arm state
-    """
-    import warnings
-    warnings.warn(
-        "get_arm_state() is deprecated and will be removed in version 2.0. "
-        "Create controller instances explicitly and call get_arm_state() method directly.",
-        DeprecationWarning,
-        stacklevel=2
-    )
-    return get_controller().get_arm_state()
-
-def cleanup():
-    """
-    Cleanup global controller.
-
-    .. deprecated:: 1.9
-        The global controller singleton pattern is deprecated and will be removed in version 2.0.
-        Instead, create and manage controller instances explicitly:
-
-        Example:
-            # Old (deprecated):
-            cleanup()
-
-            # New (recommended):
-            controller = ArmController(robot_name='vx300s', group_name='arm')
-            controller.initialize()
-            # ... use controller ...
-            controller.shutdown()
-    """
-    import warnings
-    warnings.warn(
-        "cleanup() is deprecated and will be removed in version 2.0. "
-        "Create controller instances explicitly and call shutdown() method directly.",
-        DeprecationWarning,
-        stacklevel=2
-    )
-    global _global_controller
-    if _global_controller:
-        _global_controller.shutdown()
-        _global_controller = None

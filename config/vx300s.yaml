@@ -94,7 +94,7 @@ gripper_calibration:
   follower_right:
     open: 3118
     closed: 2490
-  follower_left:
+  follower_arm:
     open: 3164
     closed: 2514
   # Default values for unknown arms (average of measured values)

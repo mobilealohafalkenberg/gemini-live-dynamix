@@ -181,6 +181,38 @@ class DynamixelController:
         # Default to full range
         return (0, 4095)
 
+    def get_calibrated_limits_radians(self) -> List[Optional[Tuple[float, float]]]:
+        """
+        Get calibrated joint limits in radians for all 6 arm joints.
+
+        Uses per-arm calibration if available. Returns None for joints
+        without specific calibration (caller should use fallback).
+
+        Returns:
+            List of 6 tuples [(min_rad, max_rad), ...] for joints [waist, shoulder,
+            elbow, forearm_roll, wrist_angle, wrist_rotate]. None indicates no
+            per-arm calibration for that joint.
+        """
+        arm_motor_ids = [1, 2, 4, 6, 7, 8]
+        limits_radians = []
+
+        for motor_id in arm_motor_ids:
+            has_calibration = (
+                self.arm_id and
+                self.arm_id in self.joint_calibration and
+                motor_id in self.joint_calibration[self.arm_id]
+            )
+
+            if has_calibration:
+                min_dxl, max_dxl = self.get_calibrated_limits(motor_id)
+                min_rad = (min_dxl - 2048) * (2 * np.pi / 4096)
+                max_rad = (max_dxl - 2048) * (2 * np.pi / 4096)
+                limits_radians.append((min_rad, max_rad))
+            else:
+                limits_radians.append(None)
+
+        return limits_radians
+
     def initialize_motors(self) -> bool:
         """
         Initialize Dynamixel communication and configure motors.

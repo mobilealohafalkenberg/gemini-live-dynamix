@@ -247,7 +247,7 @@ def build_tool_declarations(connected_arms: List[str]) -> types.Tool:
             types.FunctionDeclaration(
                 name="move_arm",
                 description="Move robot arm end-effector to a 3D Cartesian position. Use this for precise positioning.",
-                parameters=types.Schema(
+                    parameters=types.Schema(
                     type=types.Type.OBJECT,
                     properties={
                         "arm_id": types.Schema(
