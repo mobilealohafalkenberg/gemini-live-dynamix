@@ -257,7 +257,7 @@ def build_tool_declarations(connected_arms: List[str]) -> types.Tool:
                         "position": types.Schema(
                             type=types.Type.ARRAY,
                             items=types.Schema(type=types.Type.NUMBER),
-                            description="Target [x, y, z] position in meters. Robot base is origin. +X=forward, +Y=left, +Z=up."
+                            description="Target [x, y, z] position in meters. Robot base is origin. +X=forward, +Y=right, +Z=up."
                         ),
                         "orientation": types.Schema(
                             type=types.Type.ARRAY,
@@ -349,10 +349,10 @@ def build_tool_declarations(connected_arms: List[str]) -> types.Tool:
                 )
             ),
 
-            # execute_trajectory - Multi-waypoint manipulation sequences
+            # execute_trajectory - Multi-waypoint manipulation sequences with checkpoints
             types.FunctionDeclaration(
                 name="execute_trajectory",
-                description="Execute a multi-waypoint trajectory with optional gripper coordination. Use for pick-and-place sequences: approach (move above), grasp (lower + close gripper), lift (raise with object).",
+                description="Execute a multi-waypoint trajectory with gripper coordination and visual checkpoints. Set checkpoint=true on waypoints where you need to see camera images before continuing. At checkpoints, execution pauses and you can call continue_trajectory, adjust_trajectory, or cancel_trajectory.",
                 parameters=types.Schema(
                     type=types.Type.OBJECT,
                     properties={
@@ -372,16 +372,24 @@ def build_tool_declarations(connected_arms: List[str]) -> types.Tool:
                                     ),
                                     "label": types.Schema(
                                         type=types.Type.STRING,
-                                        description="Descriptive name (e.g., 'approach', 'grasp', 'lift')"
+                                        description="Descriptive name (e.g., 'approach', 'pre-grasp', 'grasp', 'lift')"
+                                    ),
+                                    "gripper_position": types.Schema(
+                                        type=types.Type.NUMBER,
+                                        description="Gripper position: 0.0 (closed) to 1.0 (open). Use ~0.3 for grasping, ~0.8 for approach."
                                     ),
                                     "gripper_action": types.Schema(
                                         type=types.Type.STRING,
-                                        description="Optional: 'open', 'close', or omit to maintain current state"
+                                        description="Legacy: 'open' or 'close'. Prefer gripper_position for precise control."
+                                    ),
+                                    "checkpoint": types.Schema(
+                                        type=types.Type.BOOLEAN,
+                                        description="If true, pause at this waypoint and return camera images for verification before continuing."
                                     )
                                 },
                                 required=["point", "label"]
                             ),
-                            description="Ordered list of waypoints to execute"
+                            description="Ordered list of waypoints. Set checkpoint=true before critical actions (e.g., before grasping) to verify position."
                         ),
                         "speed": types.Schema(
                             type=types.Type.STRING,
@@ -389,6 +397,63 @@ def build_tool_declarations(connected_arms: List[str]) -> types.Tool:
                         )
                     },
                     required=["arm_id", "waypoints"]
+                )
+            ),
+
+            # continue_trajectory - Resume from checkpoint
+            types.FunctionDeclaration(
+                name="continue_trajectory",
+                description="Resume a paused trajectory from its checkpoint. Call this after reviewing checkpoint images if position looks correct.",
+                parameters=types.Schema(
+                    type=types.Type.OBJECT,
+                    properties={
+                        "trajectory_id": types.Schema(
+                            type=types.Type.STRING,
+                            description="The trajectory ID returned from execute_trajectory at checkpoint"
+                        )
+                    },
+                    required=["trajectory_id"]
+                )
+            ),
+
+            # adjust_trajectory - Adjust and resume
+            types.FunctionDeclaration(
+                name="adjust_trajectory",
+                description="Adjust remaining waypoints of a paused trajectory and resume. Use when checkpoint images show the position needs correction.",
+                parameters=types.Schema(
+                    type=types.Type.OBJECT,
+                    properties={
+                        "trajectory_id": types.Schema(
+                            type=types.Type.STRING,
+                            description="The trajectory ID returned from execute_trajectory at checkpoint"
+                        ),
+                        "position_offset": types.Schema(
+                            type=types.Type.ARRAY,
+                            items=types.Schema(type=types.Type.NUMBER),
+                            description="[dx, dy, dz] offset in meters to apply to all remaining waypoints. Positive X = forward, positive Y = right, positive Z = up."
+                        ),
+                        "gripper_offset": types.Schema(
+                            type=types.Type.NUMBER,
+                            description="Offset to add to gripper_position of remaining waypoints (e.g., -0.1 to close tighter). Clamped to 0.0-1.0."
+                        )
+                    },
+                    required=["trajectory_id"]
+                )
+            ),
+
+            # cancel_trajectory - Abort trajectory
+            types.FunctionDeclaration(
+                name="cancel_trajectory",
+                description="Cancel a paused trajectory. The arm stays at current position.",
+                parameters=types.Schema(
+                    type=types.Type.OBJECT,
+                    properties={
+                        "trajectory_id": types.Schema(
+                            type=types.Type.STRING,
+                            description="The trajectory ID to cancel"
+                        )
+                    },
+                    required=["trajectory_id"]
                 )
             )
         ]
@@ -565,12 +630,16 @@ def execute_get_arm_state(arm_id: str) -> Dict[str, Any]:
 
 
 def execute_trajectory(arm_id: str, waypoints: List[Dict], speed: str = 'slow') -> Dict[str, Any]:
-    """Execute multi-waypoint trajectory with gripper coordination.
+    """Execute multi-waypoint trajectory with gripper coordination and checkpoint support.
 
     Args:
         arm_id: Which arm (follower_right, follower_left)
-        waypoints: List of waypoint dicts with 'point', 'label', optional 'gripper_action'
+        waypoints: List of waypoint dicts with 'point', 'label', optional 'gripper_position'/'gripper_action', optional 'checkpoint'
         speed: 'slow' (2.5s), 'medium' (1.5s), or 'fast' (0.8s) per waypoint
+
+    Returns:
+        If checkpoint hit: returns status='checkpoint' with trajectory_id and current position
+        If completed: returns status='success' or 'failed'
     """
     print(f"[Robot] Executing trajectory on {arm_id}: {len(waypoints)} waypoints at {speed} speed")
 
@@ -598,20 +667,174 @@ def execute_trajectory(arm_id: str, waypoints: List[Dict], speed: str = 'slow') 
             blocking=True
         )
 
-        if result.get('success'):
+        # Check if we hit a checkpoint
+        if result.get('status') == 'checkpoint':
+            return {
+                "status": "checkpoint",
+                "trajectory_id": result.get('trajectory_id'),
+                "current_waypoint": result.get('current_waypoint'),
+                "label": result.get('label'),
+                "current_position": result.get('current_position'),
+                "remaining_waypoints": result.get('remaining_waypoints'),
+                "waypoints_completed": len(result.get('waypoints_completed', [])),
+                "total_waypoints": result.get('total_waypoints'),
+                "message": f"Checkpoint at '{result.get('label')}'. Review images and call continue_trajectory, adjust_trajectory, or cancel_trajectory."
+            }
+
+        # Normal completion
+        if result.get('success') or result.get('status') == 'completed':
             return {
                 "status": "success",
+                "trajectory_id": result.get('trajectory_id'),
                 "waypoints_completed": result.get('total_waypoints', len(waypoints)),
                 "message": "Trajectory complete. Verify in camera images."
             }
         else:
             return {
                 "status": "partial",
+                "trajectory_id": result.get('trajectory_id'),
                 "waypoints_completed": len(result.get('waypoints_completed', [])),
                 "error": result.get('error', 'Trajectory incomplete')
             }
     except Exception as e:
         return {"status": "error", "error": str(e)}
+
+
+def execute_continue_trajectory(trajectory_id: str) -> Dict[str, Any]:
+    """Resume a paused trajectory from its checkpoint.
+
+    Args:
+        trajectory_id: The trajectory ID returned from execute_trajectory at checkpoint
+    """
+    print(f"[Robot] Continuing trajectory {trajectory_id}")
+
+    # Find the arm that owns this trajectory
+    for arm_id, controllers in arm_controllers.items():
+        arm = controllers['arm']
+        if trajectory_id in arm.paused_trajectories:
+            result = arm.continue_trajectory(trajectory_id)
+
+            # Check for another checkpoint
+            if result.get('status') == 'checkpoint':
+                return {
+                    "status": "checkpoint",
+                    "trajectory_id": result.get('trajectory_id'),
+                    "current_waypoint": result.get('current_waypoint'),
+                    "label": result.get('label'),
+                    "current_position": result.get('current_position'),
+                    "remaining_waypoints": result.get('remaining_waypoints'),
+                    "waypoints_completed": len(result.get('waypoints_completed', [])),
+                    "total_waypoints": result.get('total_waypoints'),
+                    "message": f"Checkpoint at '{result.get('label')}'. Review images and continue/adjust/cancel."
+                }
+
+            # Completed
+            if result.get('success') or result.get('status') == 'completed':
+                return {
+                    "status": "success",
+                    "trajectory_id": trajectory_id,
+                    "waypoints_completed": result.get('total_waypoints', 0),
+                    "message": "Trajectory complete. Verify in camera images."
+                }
+            else:
+                return {
+                    "status": "error",
+                    "trajectory_id": trajectory_id,
+                    "error": result.get('error', 'Continue failed')
+                }
+
+    return {"status": "error", "error": f"Trajectory {trajectory_id} not found"}
+
+
+def execute_adjust_trajectory(trajectory_id: str, position_offset: Optional[List[float]] = None,
+                              gripper_offset: float = 0.0) -> Dict[str, Any]:
+    """Adjust remaining waypoints of a paused trajectory and resume.
+
+    Args:
+        trajectory_id: The trajectory ID returned from execute_trajectory at checkpoint
+        position_offset: [dx, dy, dz] offset in meters to apply to remaining waypoints
+        gripper_offset: Offset to add to gripper_position (clamped to 0.0-1.0)
+    """
+    offset_desc = f"position={position_offset}" if position_offset else ""
+    if gripper_offset != 0.0:
+        offset_desc += f" gripper={gripper_offset:+.2f}"
+    print(f"[Robot] Adjusting trajectory {trajectory_id}: {offset_desc}")
+
+    # Find the arm that owns this trajectory
+    for arm_id, controllers in arm_controllers.items():
+        arm = controllers['arm']
+        if trajectory_id in arm.paused_trajectories:
+            result = arm.adjust_trajectory(
+                trajectory_id=trajectory_id,
+                position_offset=position_offset,
+                gripper_offset=gripper_offset
+            )
+
+            # Check for another checkpoint
+            if result.get('status') == 'checkpoint':
+                return {
+                    "status": "checkpoint",
+                    "trajectory_id": result.get('trajectory_id'),
+                    "current_waypoint": result.get('current_waypoint'),
+                    "label": result.get('label'),
+                    "current_position": result.get('current_position'),
+                    "remaining_waypoints": result.get('remaining_waypoints'),
+                    "waypoints_completed": len(result.get('waypoints_completed', [])),
+                    "total_waypoints": result.get('total_waypoints'),
+                    "adjustment_applied": result.get('adjustment_applied'),
+                    "message": f"Adjusted and reached checkpoint at '{result.get('label')}'."
+                }
+
+            # Completed
+            if result.get('success') or result.get('status') == 'completed':
+                return {
+                    "status": "success",
+                    "trajectory_id": trajectory_id,
+                    "waypoints_completed": result.get('total_waypoints', 0),
+                    "adjustment_applied": result.get('adjustment_applied'),
+                    "message": "Trajectory complete with adjustments. Verify in camera images."
+                }
+            else:
+                return {
+                    "status": "error",
+                    "trajectory_id": trajectory_id,
+                    "error": result.get('error', 'Adjust failed')
+                }
+
+    return {"status": "error", "error": f"Trajectory {trajectory_id} not found"}
+
+
+def execute_cancel_trajectory(trajectory_id: str) -> Dict[str, Any]:
+    """Cancel a paused trajectory.
+
+    Args:
+        trajectory_id: The trajectory ID to cancel
+    """
+    print(f"[Robot] Cancelling trajectory {trajectory_id}")
+
+    # Find the arm that owns this trajectory
+    for arm_id, controllers in arm_controllers.items():
+        arm = controllers['arm']
+        if trajectory_id in arm.paused_trajectories:
+            # Remove from paused trajectories
+            del arm.paused_trajectories[trajectory_id]
+            return {
+                "status": "canceled",
+                "trajectory_id": trajectory_id,
+                "message": "Trajectory canceled. Arm remains at current position."
+            }
+
+        # Also check active trajectories (for async mode)
+        if trajectory_id in arm.active_trajectories:
+            result = arm.cancel_trajectory(trajectory_id)
+            return {
+                "status": "canceled" if result.get('success') else "error",
+                "trajectory_id": trajectory_id,
+                "message": result.get('message', 'Trajectory canceled'),
+                "error": result.get('error')
+            }
+
+    return {"status": "error", "error": f"Trajectory {trajectory_id} not found"}
 
 
 def build_system_instruction(connected_arms: List[str]) -> str:
@@ -624,7 +847,8 @@ AVAILABLE ARMS: {arm_list}
 Use the appropriate arm_id from the available arms for all function calls.
 
 COORDINATE SYSTEM (meters, relative to robot base):
-+X: Forward | +Y: Left | -Y: Right | +Z: Up
++X: Forward | +Y: Right | +Z: Up
+-X: Backward | -Y: Left | -Z: Down
 Typical workspace: X: 0.15-0.50m, Y: -0.30 to +0.30m, Z: 0.02-0.40m
 
 GRIPPER PITCH CONTROL:
@@ -641,23 +865,40 @@ IMPORTANT: Achievable pitch depends on position height:
 If requested pitch is not achievable, it will be relaxed toward horizontal.
 If pitch_degrees is omitted, defaults to -30°. Yaw auto-calculates to face target.
 
-TRAJECTORY TOOL FOR PICK-AND-PLACE:
-For pick-and-place sequences, use execute_trajectory instead of multiple move_arm calls.
-Example pick sequence:
+TRAJECTORY TOOL WITH VISUAL CHECKPOINTS:
+For pick-and-place, use execute_trajectory with checkpoints for visual verification.
+
+Example pick sequence with checkpoint before grasp:
   waypoints: [
-    {{"point": [x, y, z+0.10], "label": "approach"}},
-    {{"point": [x, y, z], "label": "grasp", "gripper_action": "close"}},
-    {{"point": [x, y, z+0.15], "label": "lift"}}
+    {{"point": [x, y, z+0.10], "label": "approach", "gripper_position": 1.0}},
+    {{"point": [x, y, z+0.02], "label": "pre-grasp", "gripper_position": 0.8, "checkpoint": true}},
+    {{"point": [x, y, z], "label": "grasp", "gripper_position": 0.3}},
+    {{"point": [x, y, z+0.15], "label": "lift", "gripper_position": 0.3}}
   ]
+
+CHECKPOINT WORKFLOW:
+1. Set checkpoint: true on waypoints where you need visual verification (especially before grasping)
+2. At checkpoint, execution pauses and you receive camera images
+3. Review images and decide:
+   - continue_trajectory(trajectory_id) - position looks good, proceed
+   - adjust_trajectory(trajectory_id, position_offset=[dx,dy,dz]) - shift remaining waypoints
+   - cancel_trajectory(trajectory_id) - abort if position is wrong
+
+GRIPPER CONTROL:
+- Use gripper_position: 0.0 (closed) to 1.0 (open)
+- ~0.3 for grasping small objects, ~0.8 for approach, 1.0 for fully open
+- Legacy gripper_action ('open'/'close') still works but gripper_position is preferred
 
 CAMERAS:
 - Gripper cameras (left_gripper, right_gripper) are on respective arm grippers
 - Overhead camera provides bird's-eye view of workspace
 
 EXECUTION PROTOCOL:
-1. After EVERY action, examine NEW camera images to verify result
-2. If action failed or missed, adjust and retry
-3. Call finish_task when complete or impossible
+1. Estimate object position from camera images
+2. Plan trajectory with checkpoint before critical actions (grasping)
+3. At checkpoint, verify position and adjust if needed
+4. After completion, verify result in images
+5. Call finish_task when complete or impossible
 
 Be precise. Small adjustments (1-2cm) often needed."""
 
@@ -911,6 +1152,23 @@ class RobotSession:
                     args.get('arm_id'),
                     args.get('waypoints', []),
                     args.get('speed', 'slow')
+                )
+            elif name == "continue_trajectory":
+                return await asyncio.to_thread(
+                    execute_continue_trajectory,
+                    args.get('trajectory_id')
+                )
+            elif name == "adjust_trajectory":
+                return await asyncio.to_thread(
+                    execute_adjust_trajectory,
+                    args.get('trajectory_id'),
+                    args.get('position_offset'),
+                    args.get('gripper_offset', 0.0)
+                )
+            elif name == "cancel_trajectory":
+                return await asyncio.to_thread(
+                    execute_cancel_trajectory,
+                    args.get('trajectory_id')
                 )
             else:
                 return {"status": "error", "error": f"Unknown tool: {name}"}
