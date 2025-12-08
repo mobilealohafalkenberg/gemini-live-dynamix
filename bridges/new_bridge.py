@@ -333,6 +333,22 @@ def build_tool_declarations(connected_arms: List[str]) -> types.Tool:
                 )
             ),
 
+            # get_arm_state - Query current arm position
+            types.FunctionDeclaration(
+                name="get_arm_state",
+                description="Get the current position and state of an arm. Returns end-effector position (x,y,z), joint angles, and arm state. Use this to check current position before planning movements.",
+                parameters=types.Schema(
+                    type=types.Type.OBJECT,
+                    properties={
+                        "arm_id": types.Schema(
+                            type=types.Type.STRING,
+                            description=arm_enum_desc
+                        )
+                    },
+                    required=["arm_id"]
+                )
+            ),
+
             # execute_trajectory - Multi-waypoint manipulation sequences
             types.FunctionDeclaration(
                 name="execute_trajectory",
@@ -403,12 +419,24 @@ def execute_move_arm(arm_id: str, position: List[float], orientation: Optional[L
 
     try:
         arm = arm_controllers[arm_id]['arm']
+
+        # Get starting position
+        start_state = arm.get_arm_state()
+        start_ee = start_state.get('ee_position', {})
+        start_position = [start_ee.get('x', 0), start_ee.get('y', 0), start_ee.get('z', 0)]
+
         result = arm.move_to_position(position, orientation=orientation, pitch_degrees=pitch_degrees, moving_time=moving_time, blocking=True)
         if result.get('success'):
-            state = arm.get_arm_state()
+            # Get final position
+            final_state = arm.get_arm_state()
+            final_ee = final_state.get('ee_position', {})
+            final_position = [final_ee.get('x', 0), final_ee.get('y', 0), final_ee.get('z', 0)]
+
             response = {
                 "status": "success",
-                "final_position": state.get('end_effector_position', {}),
+                "start_position": start_position,
+                "final_position": final_position,
+                "target_position": position,
                 "message": "Movement complete. Verify alignment in camera images."
             }
 
@@ -496,6 +524,42 @@ def execute_resume_after_stop(arm_id: str) -> Dict[str, Any]:
             }
         else:
             return {"status": "error", "error": result.get('error', 'Resume failed')}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+def execute_get_arm_state(arm_id: str) -> Dict[str, Any]:
+    """Get current arm state and position.
+
+    Args:
+        arm_id: Which arm (follower_right, follower_left)
+
+    Returns:
+        Dict with position, joints, and state info
+    """
+    print(f"[Robot] Getting state for {arm_id}")
+
+    if arm_id not in arm_controllers:
+        return {"status": "error", "error": f"Arm '{arm_id}' not found. Available: {list(arm_controllers.keys())}"}
+
+    try:
+        arm = arm_controllers[arm_id]['arm']
+        state = arm.get_arm_state()
+
+        if state.get('success'):
+            ee_pos = state.get('ee_position', {})
+            return {
+                "status": "success",
+                "arm_id": arm_id,
+                "position": [ee_pos.get('x', 0), ee_pos.get('y', 0), ee_pos.get('z', 0)],
+                "position_dict": ee_pos,
+                "orientation": state.get('ee_orientation', {}),
+                "joints_degrees": state.get('joints_degrees', []),
+                "state": state.get('state', 'unknown'),
+                "pose": state.get('pose')  # Named pose if applicable (home, sleep, ready)
+            }
+        else:
+            return {"status": "error", "error": state.get('error', 'Failed to get arm state')}
     except Exception as e:
         return {"status": "error", "error": str(e)}
 
@@ -834,6 +898,11 @@ class RobotSession:
             elif name == "resume_after_stop":
                 return await asyncio.to_thread(
                     execute_resume_after_stop,
+                    args.get('arm_id')
+                )
+            elif name == "get_arm_state":
+                return await asyncio.to_thread(
+                    execute_get_arm_state,
                     args.get('arm_id')
                 )
             elif name == "execute_trajectory":
