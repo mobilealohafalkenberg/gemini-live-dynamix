@@ -444,6 +444,8 @@ class ArmController:
         Preferences:
         - Waist near 0° (front-facing): weight 2.0
         - Forearm roll near 0° (gripper upright): weight 1.5
+        - Forward-reaching configuration (shoulder negative, elbow positive): weight 3.0
+        - Wrist pointing down for manipulation (wrist_angle negative): weight 2.0
         - Minimal change from current position: weight 1.0
 
         Args:
@@ -462,6 +464,23 @@ class ArmController:
 
         # Prefer gripper upright (forearm_roll near 0)
         score += 1.5 * abs(forearm_roll)
+
+        # CRITICAL: Prefer forward-reaching configurations (elbow-down)
+        # Shoulder: negative = reaching forward/down, positive = reaching up/back
+        # Elbow: positive = extended outward (good for forward reach)
+        # Penalize "folded back" configurations heavily
+        if shoulder > 0:
+            # Arm is reaching up/back - penalize heavily
+            score += 5.0 * shoulder
+        if elbow < 0:
+            # Elbow is folded inward - penalize
+            score += 3.0 * abs(elbow)
+
+        # Prefer wrist pointing down for manipulation tasks
+        # wrist_angle negative = pointing down (good for picking)
+        if wrist_angle > 0:
+            # Wrist is bent back/up - penalize for manipulation
+            score += 2.0 * wrist_angle
 
         # Prefer minimal joint movement from current position
         for i in range(6):
