@@ -391,6 +391,52 @@ class ArmController:
 
         return True
 
+    def _calculate_achievable_pitch(self, target_z: float, distance_xy: float) -> float:
+        """
+        Calculate an achievable pitch angle based on target height and reach.
+
+        Uses empirically validated pitch ranges for VX300S:
+        - High (z > 0.30m): -20° base, limited downward pitch
+        - Mid (z = 0.20-0.30m): -35° base
+        - Low (z = 0.10-0.20m): -45° base
+        - Table level (z < 0.10m): -60° base
+
+        Extended reaches limit downward pitch capability.
+
+        Args:
+            target_z: Target Z position in meters
+            distance_xy: Horizontal distance to target in meters
+
+        Returns:
+            Recommended pitch angle in radians (negative = down)
+        """
+        # Base pitch based on height zone
+        if target_z > 0.30:
+            # High targets - use gentle downward pitch
+            base_pitch = math.radians(-20)
+            pitch_range = math.radians(10)  # Can vary -10 to -30
+        elif target_z > 0.20:
+            # Mid-height targets
+            base_pitch = math.radians(-35)
+            pitch_range = math.radians(12)  # Can vary -23 to -47
+        elif target_z > 0.10:
+            # Low targets
+            base_pitch = math.radians(-45)
+            pitch_range = math.radians(15)  # Can vary -30 to -60
+        else:
+            # Table level targets
+            base_pitch = math.radians(-60)
+            pitch_range = math.radians(15)  # Can vary -45 to -75
+
+        # Adjust for reach - extended reaches require less steep pitch
+        # Max useful reach is about 0.4m for VX300S
+        reach_factor = min(distance_xy / 0.4, 1.0)  # 0-1 normalized
+
+        # Extended reach = less steep (toward 0), close reach = can be steeper
+        pitch = base_pitch + (reach_factor * pitch_range)
+
+        return pitch
+
     def _score_ik_solution(self, solution: List[float], current_joints: List[float]) -> float:
         """
         Score an IK solution (lower is better).
@@ -483,6 +529,65 @@ class ArmController:
             print(f"[ArmController] Found {len(valid_solutions)} valid IK solutions, selected best (waist={math.degrees(best[0]):.1f}°)")
 
         return best, True
+
+    def _compute_ik_with_orientation_relaxation(
+        self,
+        position: Dict[str, float],
+        orientation: List[float],
+        current_joints: List[float],
+        max_pitch_relaxation: float = math.radians(60)
+    ) -> Tuple[Optional[List[float]], List[float], bool]:
+        """
+        Compute IK with progressive orientation relaxation.
+
+        Standard robotics approach: try exact orientation first, then progressively
+        relax pitch toward horizontal until IK succeeds.
+
+        Args:
+            position: Target position dict with x, y, z
+            orientation: Desired [roll, pitch, yaw] in radians
+            current_joints: Current joint positions for IK guess
+            max_pitch_relaxation: Maximum pitch adjustment allowed (radians)
+
+        Returns:
+            Tuple of (joint_solution, achieved_orientation, success)
+            - achieved_orientation may differ from input if relaxation was needed
+        """
+        roll, desired_pitch, yaw = orientation
+
+        # Relaxation steps (15° increments toward horizontal)
+        step_size = math.radians(15)
+        relaxation_steps = [0.0]
+
+        current_relaxation = step_size
+        while current_relaxation <= max_pitch_relaxation:
+            relaxation_steps.append(current_relaxation)
+            current_relaxation += step_size
+
+        for relaxation in relaxation_steps:
+            # Relax pitch toward horizontal (toward 0)
+            if desired_pitch < 0:
+                # Pitch is negative (pointing down), relax toward 0
+                test_pitch = min(desired_pitch + relaxation, 0.0)
+            else:
+                # Pitch is positive (pointing up), relax toward 0
+                test_pitch = max(desired_pitch - relaxation, 0.0)
+
+            test_orientation = [roll, test_pitch, yaw]
+            T_target = self._build_transformation_matrix(position, test_orientation)
+
+            joint_list, success = self._compute_ik_with_preference(
+                T_target,
+                current_joints
+            )
+
+            if success:
+                if relaxation > 0:
+                    print(f"[ArmController] IK succeeded with relaxed pitch: "
+                          f"{math.degrees(desired_pitch):.1f}° → {math.degrees(test_pitch):.1f}°")
+                return joint_list, test_orientation, True
+
+        return None, orientation, False
 
     def parse_joint_angles(self, angles: List[float], unit: str = 'auto') -> List[float]:
         """
@@ -718,26 +823,11 @@ class ArmController:
                 # Yaw: face toward target position
                 yaw = math.atan2(pos['y'], pos['x'])
 
-                # Pitch: automatically point toward target based on height difference
-                # Get current gripper height (or use default working height)
-                if self.current_ee_pose is not None:
-                    current_z = float(self.current_ee_pose[2, 3])
-                else:
-                    current_z = 0.3  # Default working height if unknown
-
                 # Distance to target in XY plane
                 distance_xy = math.sqrt(pos['x']**2 + pos['y']**2)
 
-                # Height difference (negative when target is below gripper)
-                dz = pos['z'] - current_z
-
-                # Calculate pitch angle (negative = down, positive = up)
-                if distance_xy > 0.05:  # Avoid division issues for very close targets
-                    pitch = math.atan2(dz, distance_xy)
-                    # Clamp to safe range: -90° to +45°
-                    pitch = max(-1.57, min(0.78, pitch))
-                else:
-                    pitch = 0.0
+                # Calculate achievable pitch based on Z height and reach
+                pitch = self._calculate_achievable_pitch(pos['z'], distance_xy)
 
                 orientation = [0.0, pitch, yaw]
                 print(f"[ArmController] Auto-orientation: pitch={math.degrees(pitch):.1f}°, yaw={math.degrees(yaw):.1f}°")
@@ -747,8 +837,8 @@ class ArmController:
 
             print(f"[ArmController] Moving to position: x={pos['x']:.3f}, y={pos['y']:.3f}, z={pos['z']:.3f}")
 
-            # Build SE(3) transformation matrix for target pose
-            T_target = self._build_transformation_matrix(pos, orientation)
+            # Store requested orientation for feedback
+            requested_orientation = orientation.copy()
 
             # Get current joint positions for IK initial guess
             current_joints = self.dxl.get_joint_positions_radians()
@@ -757,10 +847,11 @@ class ArmController:
                     self.current_state = ArmState.ERROR
                 return {"success": False, "error": "Failed to read current position", "state": "error"}
 
-            # Run IK with multi-guess strategy for better configuration selection
-            print(f"[ArmController] Computing IK solution with preference...")
-            joint_list, success = self._compute_ik_with_preference(
-                T_target,
+            # Run IK with orientation relaxation for better success rate
+            print(f"[ArmController] Computing IK with orientation relaxation...")
+            joint_list, achieved_orientation, success = self._compute_ik_with_orientation_relaxation(
+                pos,
+                orientation,
                 list(current_joints)
             )
 
@@ -769,10 +860,18 @@ class ArmController:
                     self.current_state = ArmState.ERROR
                 return {
                     "success": False,
-                    "error": f"IK solution not found - position [{pos['x']:.3f}, {pos['y']:.3f}, {pos['z']:.3f}] may be out of reach",
+                    "error": f"IK failed even with orientation relaxation. Position [{pos['x']:.3f}, {pos['y']:.3f}, {pos['z']:.3f}] may be out of reach.",
                     "state": "error",
-                    "target_position": pos
+                    "target_position": pos,
+                    "attempted_orientation": {
+                        "roll": requested_orientation[0],
+                        "pitch": requested_orientation[1],
+                        "yaw": requested_orientation[2]
+                    }
                 }
+
+            # Check if orientation was relaxed
+            orientation_relaxed = (achieved_orientation != requested_orientation)
 
             print(f"[ArmController] IK solution: joints={[f'{math.degrees(j):.1f}°' for j in joint_list]}")
 
@@ -789,7 +888,18 @@ class ArmController:
                 self.current_state = ArmState.AT_TARGET
                 self.current_joints = joint_list
 
-            return self.get_arm_state()
+            # Build result with orientation feedback
+            result = self.get_arm_state()
+            result['achieved_orientation'] = {
+                'roll': achieved_orientation[0],
+                'pitch': achieved_orientation[1],
+                'yaw': achieved_orientation[2]
+            }
+            result['orientation_relaxed'] = orientation_relaxed
+            if orientation_relaxed:
+                result['requested_pitch'] = requested_orientation[1]
+                result['achieved_pitch'] = achieved_orientation[1]
+            return result
             
         except Exception as e:
             with self.state_lock:
@@ -1422,6 +1532,7 @@ class ArmController:
 
         print(f"[ArmController] Speed set: moving_time={moving_time}s, accel_time={self.default_accel_time}s")
     
+    # Emergency stop is depricated and not in use - needs to be removed 
     def emergency_stop(self) -> Dict:
         """
         Emergency stop - immediately disable torque on all joints and enter ERROR state.

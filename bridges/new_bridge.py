@@ -262,7 +262,7 @@ def build_tool_declarations(connected_arms: List[str]) -> types.Tool:
                         "orientation": types.Schema(
                             type=types.Type.ARRAY,
                             items=types.Schema(type=types.Type.NUMBER),
-                            description="Optional [roll, pitch, yaw] in radians. pitch=-1.57 points straight down, pitch=-0.78 points 45° down. If not provided, orientation auto-adjusts to point toward the target."
+                            description="Optional [roll, pitch, yaw] in radians. Achievable pitch depends on height: high targets (-0.17 to -0.52 rad), table-level (-0.78 to -1.31 rad). If not provided, auto-calculates achievable downward pitch. If requested pitch is not achievable, system relaxes to nearest achievable angle."
                         ),
                         "moving_time": types.Schema(
                             type=types.Type.NUMBER,
@@ -356,11 +356,24 @@ def execute_move_arm(arm_id: str, position: List[float], orientation: Optional[L
         result = arm.move_to_position(position, orientation=orientation, moving_time=moving_time, blocking=True)
         if result.get('success'):
             state = arm.get_arm_state()
-            return {
+            response = {
                 "status": "success",
                 "final_position": state.get('end_effector_position', {}),
                 "message": "Movement complete. Verify alignment in camera images."
             }
+
+            # Include orientation feedback if relaxation occurred
+            if result.get('orientation_relaxed'):
+                import math
+                requested_pitch_deg = math.degrees(result.get('requested_pitch', 0))
+                achieved_pitch_deg = math.degrees(result.get('achieved_pitch', 0))
+                response['orientation_note'] = (
+                    f"Note: Requested pitch ({requested_pitch_deg:.0f}°) was not achievable. "
+                    f"Used pitch={achieved_pitch_deg:.0f}° instead."
+                )
+                response['achieved_orientation'] = result.get('achieved_orientation')
+
+            return response
         else:
             return {"status": "error", "error": result.get('error', 'Move failed')}
     except Exception as e:
@@ -448,6 +461,17 @@ Use the appropriate arm_id from the available arms for all function calls.
 
 COORDINATE SYSTEM (meters, relative to robot base):
 +X: Forward | +Y: Left | -Y: Right | +Z: Up
+
+ORIENTATION GUIDANCE:
+Achievable pitch angles depend on target height:
+- High positions (z > 0.30m): pitch -10° to -30°
+- Mid positions (z = 0.20-0.30m): pitch -20° to -45°
+- Low positions (z = 0.10-0.20m): pitch -30° to -60°
+- Table level (z < 0.10m): pitch -45° to -75°
+
+IMPORTANT: pitch=-90° (straight down) is only achievable at very low Z with arm extended forward.
+If you don't specify orientation, the system auto-calculates an achievable downward pitch.
+If your requested pitch is not achievable, the system will relax to the nearest achievable angle.
 
 CAMERAS:
 - Gripper cameras (left_gripper, right_gripper) are mounted on their respective arm's gripper
