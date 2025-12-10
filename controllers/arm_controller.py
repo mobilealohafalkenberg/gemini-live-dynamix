@@ -109,10 +109,6 @@ class ArmController:
         self.active_trajectories = {}  # trajectory_id -> trajectory info
         self.trajectory_lock = threading.Lock()
         self.cancel_flags = {}  # trajectory_id -> threading.Event for cancellation
-
-        # Paused trajectories for checkpoint-based execution
-        # trajectory_id -> {remaining_waypoints, gripper_controller, current_position}
-        self.paused_trajectories = {}
         
     def initialize(self) -> bool:
         """
@@ -677,39 +673,17 @@ class ArmController:
         """
         Convert waypoint format to position list [x, y, z].
 
-        Handles two formats:
-        - 2D: [y, x] (normalized or meters) -> [x, y, z] with default z=0.2
-        - 3D: [x, y, z] -> returned as-is
-
-        For 2D points, coordinates > 1 are treated as normalized (0-1000 range)
-        and divided by 1000 to convert to meters.
-
         Args:
-            point: Waypoint coordinates as list
+            point: Waypoint coordinates as [x, y, z] in meters
 
         Returns:
             Position as [x, y, z] in meters
 
         Examples:
-            >>> _convert_waypoint_to_position([500, 300])  # normalized [y, x]
-            [0.3, 0.5, 0.2]
-
-            >>> _convert_waypoint_to_position([0.5, 0.3])  # meters [y, x]
-            [0.3, 0.5, 0.2]
-
-            >>> _convert_waypoint_to_position([0.25, 0.1, 0.15])  # [x, y, z]
+            >>> _convert_waypoint_to_position([0.25, 0.1, 0.15])
             [0.25, 0.1, 0.15]
         """
-        if len(point) == 2:
-            # [y, x] format - convert to [x, y, z]
-            # Normalize coordinates > 1 (assumed to be in 0-1000 range)
-            x = point[1] / 1000.0 if point[1] > 1 else point[1]
-            y = point[0] / 1000.0 if point[0] > 1 else point[0]
-            z = 0.2  # Default working height
-            return [x, y, z]
-        else:
-            # 3D format or other - return as-is
-            return point
+        return list(point)
 
     def move_joints(self, 
                    joint_positions: List[float],
@@ -1089,18 +1063,23 @@ class ArmController:
 
     def execute_trajectory(self, waypoints: List[Dict], coordinate_with_gripper=None, blocking: bool = True) -> Dict:
         """
-        Execute a multi-waypoint trajectory with optional gripper coordination.
+        Execute a multi-waypoint trajectory with optional gripper coordination and checkpoints.
 
         Args:
             waypoints: List of waypoint dictionaries with:
-                - 'point': [x,y,z] position or [y,x] normalized
-                - 'label': descriptive name for waypoint
-                - 'gripper_action': optional 'open', 'close', or 'maintain'
+                - 'point': [x, y, z] position in meters (required)
+                - 'label': descriptive name for waypoint (optional)
+                - 'gripper_position': 0.0 (closed) to 1.0 (open) (optional)
+                - 'checkpoint': if True, stop at this waypoint for visual verification (optional)
             coordinate_with_gripper: Optional gripper controller for coordinated actions
-            blocking: If True, wait for trajectory completion. If False, return immediately with trajectory_id
+            blocking: If True, wait for trajectory completion. If False, return immediately with trajectory_id.
+                      Note: Checkpoints are only supported in blocking mode.
 
         Returns:
-            Dictionary with trajectory execution results (if blocking=True) or trajectory_id (if blocking=False)
+            Dictionary with:
+            - If checkpoint reached: status='checkpoint', current_position, remaining waypoints info
+            - If completed: status='completed', waypoints_completed list
+            - If non-blocking: trajectory_id for status polling
         """
         if not self.initialized:
             return {"success": False, "error": "Not initialized", "state": "unknown"}
@@ -1154,7 +1133,11 @@ class ArmController:
         """Execute trajectory synchronously (blocking mode) with checkpoint support.
 
         Args:
-            waypoints: List of waypoint dicts with point, label, gripper_position/gripper_action, checkpoint
+            waypoints: List of waypoint dicts with:
+                - 'point': [x, y, z] position in meters
+                - 'label': descriptive name (optional)
+                - 'gripper_position': 0.0-1.0 gripper position (optional)
+                - 'checkpoint': if True, stop for visual verification (optional)
             coordinate_with_gripper: Optional gripper controller
             trajectory_id: Optional ID for checkpoint-based resumption
             start_index: Starting waypoint index (for resumed trajectories)
@@ -1178,17 +1161,7 @@ class ArmController:
             point = waypoint.get('point', [])
             label = waypoint.get('label', f'waypoint_{i}')
             is_checkpoint = waypoint.get('checkpoint', False)
-
-            # Support both gripper_position (0.0-1.0) and legacy gripper_action
             gripper_position = waypoint.get('gripper_position')
-            gripper_action = waypoint.get('gripper_action')
-
-            # Convert legacy gripper_action to gripper_position
-            if gripper_position is None and gripper_action:
-                if gripper_action == 'open':
-                    gripper_position = 1.0
-                elif gripper_action == 'close':
-                    gripper_position = 0.0
 
             # Convert point format if needed
             position = self._convert_waypoint_to_position(point)
@@ -1206,15 +1179,7 @@ class ArmController:
             # Execute gripper action if position specified and controller provided
             if gripper_position is not None and coordinate_with_gripper:
                 try:
-                    # Use set_position for continuous control (0.0-1.0)
-                    if hasattr(coordinate_with_gripper, 'set_position'):
-                        coordinate_with_gripper.set_position(gripper_position)
-                    else:
-                        # Fallback to open/close for older gripper controllers
-                        if gripper_position >= 0.5:
-                            coordinate_with_gripper.open_gripper()
-                        else:
-                            coordinate_with_gripper.close_gripper()
+                    coordinate_with_gripper.set_gripper_position(gripper_position)
                     time.sleep(0.5)
                     print(f"[ArmController] ✓ Gripper set to {gripper_position:.2f}")
                 except Exception as e:
@@ -1235,37 +1200,21 @@ class ArmController:
             # Check for checkpoint AFTER successfully reaching the waypoint
             if is_checkpoint and i < len(waypoints) - 1:  # Don't checkpoint on last waypoint
                 remaining_waypoints = waypoints[i + 1:]
-                print(f"[ArmController] Checkpoint reached at '{label}'. Pausing for visual feedback.")
-
-                # Store paused state for later resumption
-                self.paused_trajectories[trajectory_id] = {
-                    'remaining_waypoints': remaining_waypoints,
-                    'gripper_controller': coordinate_with_gripper,
-                    'waypoints_completed': waypoint_results,
-                    'current_waypoint_index': i,
-                    'total_waypoints': len(waypoints),
-                    'paused_at': time.time()
-                }
+                print(f"[ArmController] Checkpoint reached at '{label}'. Stopping for visual feedback.")
 
                 return {
                     'status': 'checkpoint',
-                    'trajectory_id': trajectory_id,
-                    'current_waypoint': i,
                     'label': label,
                     'current_position': position,
-                    'remaining_waypoints': len(remaining_waypoints),
                     'waypoints_completed': waypoint_results,
+                    'remaining_waypoints': len(remaining_waypoints),
                     'total_waypoints': len(waypoints),
-                    'message': f"Checkpoint at '{label}'. Call continue_trajectory, adjust_trajectory, or cancel_trajectory."
+                    'message': f"Checkpoint at '{label}'. Review images and plan next trajectory."
                 }
 
         # Trajectory completed (no checkpoint or final waypoint)
         completion_msg = f"✓ Completed {len(waypoint_results)}/{len(waypoints)} waypoints" if overall_success else f"✗ Failed at waypoint {len(waypoint_results)}"
         print(f"[ArmController] {completion_msg}")
-
-        # Clean up any paused state
-        if trajectory_id in self.paused_trajectories:
-            del self.paused_trajectories[trajectory_id]
 
         return {
             'status': 'completed' if overall_success else 'failed',
@@ -1277,7 +1226,10 @@ class ArmController:
         }
 
     def _execute_trajectory_async(self, trajectory_id: str, waypoints: List[Dict], coordinate_with_gripper=None):
-        """Execute trajectory asynchronously in background thread"""
+        """Execute trajectory asynchronously in background thread.
+
+        Note: Checkpoints are not supported in async mode - use blocking=True for checkpoint support.
+        """
         try:
             # Use default moving time
             moving_time = self.default_moving_time
@@ -1300,7 +1252,7 @@ class ArmController:
 
                 point = waypoint.get('point', [])
                 label = waypoint.get('label', f'waypoint_{i}')
-                gripper_action = waypoint.get('gripper_action')
+                gripper_position = waypoint.get('gripper_position')
 
                 # Convert point format if needed
                 position = self._convert_waypoint_to_position(point)
@@ -1319,23 +1271,19 @@ class ArmController:
                     blocking=True  # Still block within the async thread
                 )
 
-                # Coordinate gripper action if controller provided
-                if gripper_action and coordinate_with_gripper:
+                # Execute gripper action if position specified and controller provided
+                if gripper_position is not None and coordinate_with_gripper:
                     try:
-                        if gripper_action == 'open':
-                            coordinate_with_gripper.open_gripper()
-                            time.sleep(0.5)
-                            print(f"[ArmController] Trajectory {trajectory_id} - ✓ Gripper opened")
-                        elif gripper_action == 'close':
-                            coordinate_with_gripper.close_gripper()
-                            time.sleep(0.5)
-                            print(f"[ArmController] Trajectory {trajectory_id} - ✓ Gripper closed")
+                        coordinate_with_gripper.set_gripper_position(gripper_position)
+                        time.sleep(0.5)
+                        print(f"[ArmController] Trajectory {trajectory_id} - ✓ Gripper set to {gripper_position:.2f}")
                     except Exception as e:
                         print(f"[ArmController] Trajectory {trajectory_id} - ✗ Gripper action failed: {e}")
 
                 waypoint_results.append({
                     'label': label,
                     'position': position,
+                    'gripper_position': gripper_position,
                     'success': result.get('success', False)
                 })
 
@@ -1478,116 +1426,6 @@ class ArmController:
                 'trajectories': trajectories,
                 'count': len(trajectories)
             }
-
-    def continue_trajectory(self, trajectory_id: str) -> Dict:
-        """
-        Resume a paused trajectory from its checkpoint.
-
-        Args:
-            trajectory_id: The trajectory ID returned from execute_trajectory at checkpoint
-
-        Returns:
-            Dict with execution results (may return another checkpoint or completion)
-        """
-        if trajectory_id not in self.paused_trajectories:
-            return {
-                'success': False,
-                'error': f'Trajectory {trajectory_id} not found or not paused'
-            }
-
-        paused = self.paused_trajectories[trajectory_id]
-        remaining = paused['remaining_waypoints']
-        gripper = paused['gripper_controller']
-        completed_so_far = paused['waypoints_completed']
-
-        print(f"[ArmController] Resuming trajectory {trajectory_id} with {len(remaining)} remaining waypoints")
-
-        # Remove from paused before continuing (will be re-added if another checkpoint)
-        del self.paused_trajectories[trajectory_id]
-
-        # Continue execution with remaining waypoints
-        result = self._execute_trajectory_sync(
-            waypoints=remaining,
-            coordinate_with_gripper=gripper,
-            trajectory_id=trajectory_id,
-            start_index=0  # Start from beginning of remaining waypoints
-        )
-
-        # Merge completed waypoints from before checkpoint
-        if 'waypoints_completed' in result:
-            result['waypoints_completed'] = completed_so_far + result['waypoints_completed']
-
-        return result
-
-    def adjust_trajectory(self, trajectory_id: str,
-                          position_offset: Optional[List[float]] = None,
-                          gripper_offset: float = 0.0) -> Dict:
-        """
-        Adjust remaining waypoints of a paused trajectory and resume execution.
-
-        Args:
-            trajectory_id: The trajectory ID returned from execute_trajectory at checkpoint
-            position_offset: [dx, dy, dz] offset to apply to all remaining waypoint positions
-            gripper_offset: Offset to apply to all remaining gripper positions (clamped to 0.0-1.0)
-
-        Returns:
-            Dict with execution results (may return another checkpoint or completion)
-        """
-        if trajectory_id not in self.paused_trajectories:
-            return {
-                'success': False,
-                'error': f'Trajectory {trajectory_id} not found or not paused'
-            }
-
-        paused = self.paused_trajectories[trajectory_id]
-        remaining = paused['remaining_waypoints']
-        gripper = paused['gripper_controller']
-        completed_so_far = paused['waypoints_completed']
-
-        # Apply position offset to all remaining waypoints
-        if position_offset:
-            dx, dy, dz = position_offset[0], position_offset[1], position_offset[2] if len(position_offset) > 2 else 0.0
-            print(f"[ArmController] Applying position offset [{dx:.3f}, {dy:.3f}, {dz:.3f}] to {len(remaining)} waypoints")
-
-            for waypoint in remaining:
-                point = waypoint.get('point', [])
-                if len(point) >= 3:
-                    waypoint['point'] = [point[0] + dx, point[1] + dy, point[2] + dz]
-                elif len(point) == 2:
-                    # For 2D waypoints, only apply x/y offset
-                    waypoint['point'] = [point[0] + dy, point[1] + dx]  # Note: 2D is [y, x] format
-
-        # Apply gripper offset to all remaining waypoints
-        if gripper_offset != 0.0:
-            print(f"[ArmController] Applying gripper offset {gripper_offset:.2f} to remaining waypoints")
-
-            for waypoint in remaining:
-                if 'gripper_position' in waypoint:
-                    new_pos = waypoint['gripper_position'] + gripper_offset
-                    waypoint['gripper_position'] = max(0.0, min(1.0, new_pos))  # Clamp to 0.0-1.0
-
-        print(f"[ArmController] Resuming adjusted trajectory {trajectory_id} with {len(remaining)} remaining waypoints")
-
-        # Remove from paused before continuing
-        del self.paused_trajectories[trajectory_id]
-
-        # Continue execution with adjusted waypoints
-        result = self._execute_trajectory_sync(
-            waypoints=remaining,
-            coordinate_with_gripper=gripper,
-            trajectory_id=trajectory_id,
-            start_index=0
-        )
-
-        # Merge completed waypoints
-        if 'waypoints_completed' in result:
-            result['waypoints_completed'] = completed_so_far + result['waypoints_completed']
-        result['adjustment_applied'] = {
-            'position_offset': position_offset,
-            'gripper_offset': gripper_offset
-        }
-
-        return result
 
     def get_arm_state(self) -> Dict:
         """
