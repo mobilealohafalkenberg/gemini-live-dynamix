@@ -637,8 +637,7 @@ def execute_trajectory(arm_id: str, waypoints: List[Dict]) -> Dict[str, Any]:
 
         result = arm.execute_trajectory(
             waypoints=waypoints,
-            coordinate_with_gripper=gripper,
-            blocking=True
+            coordinate_with_gripper=gripper
         )
 
         # Check if we hit a checkpoint
