@@ -267,7 +267,7 @@ def build_tool_declarations(connected_arms: List[str]) -> types.Tool:
                         "position": types.Schema(
                             type=types.Type.ARRAY,
                             items=types.Schema(type=types.Type.NUMBER),
-                            description="Target [x, y, z] position in meters. Robot base is origin. +X=forward, +Y=right, +Z=up."
+                            description="Target [x, y, z] position in meters. Robot base is origin. +X=forward, +Y=left, +Z=up."
                         ),
                         "orientation": types.Schema(
                             type=types.Type.ARRAY,
@@ -702,7 +702,7 @@ Be precise and verify visually."""
 
 
 # --- GEMINI SESSION MANAGER ---
-
+ion 
 class RobotSession:
     """
     Manages a single autonomous task execution session.
