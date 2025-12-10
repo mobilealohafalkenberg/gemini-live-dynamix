@@ -415,7 +415,12 @@ def execute_move_arm(arm_id: str, position: List[float], orientation: Optional[L
         print(f"[Robot] Moving {arm_id} to {position} (default pitch: -30°)")
 
     if arm_id not in arm_controllers:
-        return {"status": "error", "error": f"Arm '{arm_id}' not found. Available: {list(arm_controllers.keys())}"}
+        return {
+            "status": "error",
+            "error": f"Arm '{arm_id}' not found",
+            "valid_arms": list(arm_controllers.keys()),
+            "recovery": "Use a valid arm_id from valid_arms"
+        }
 
     try:
         arm = arm_controllers[arm_id]['arm']
@@ -453,9 +458,17 @@ def execute_move_arm(arm_id: str, position: List[float], orientation: Optional[L
 
             return response
         else:
-            return {"status": "error", "error": result.get('error', 'Move failed')}
+            return {
+                "status": "error",
+                "error": result.get('error', 'Move failed'),
+                "recovery": "Check position is within workspace (X: 0.15-0.50m, Y: -0.30-0.30m, Z: 0.02-0.40m)"
+            }
     except Exception as e:
-        return {"status": "error", "error": str(e)}
+        return {
+            "status": "error",
+            "error": str(e),
+            "recovery": "Try resume_after_stop if arm is in error state"
+        }
 
 
 def execute_control_gripper(arm_id: str, position: float) -> Dict[str, Any]:
@@ -468,11 +481,20 @@ def execute_control_gripper(arm_id: str, position: float) -> Dict[str, Any]:
     print(f"[Robot] Gripper {arm_id} -> position {position:.2f}")
 
     if arm_id not in arm_controllers:
-        return {"status": "error", "error": f"Arm '{arm_id}' not found. Available: {list(arm_controllers.keys())}"}
+        return {
+            "status": "error",
+            "error": f"Arm '{arm_id}' not found",
+            "valid_arms": list(arm_controllers.keys()),
+            "recovery": "Use a valid arm_id from valid_arms"
+        }
 
     # Validate position range
     if not 0.0 <= position <= 1.0:
-        return {"status": "error", "error": f"Position {position} out of range. Use 0.0 (closed) to 1.0 (open)."}
+        return {
+            "status": "error",
+            "error": f"Position {position} out of range",
+            "recovery": "Use position between 0.0 (closed) and 1.0 (open)"
+        }
 
     try:
         gripper = arm_controllers[arm_id]['gripper']
@@ -491,10 +513,15 @@ def execute_control_gripper(arm_id: str, position: float) -> Dict[str, Any]:
             return {
                 "status": "error",
                 "target_position": position,
-                "error": result.get('error', 'Gripper position failed')
+                "error": result.get('error', 'Gripper position failed'),
+                "recovery": "Check gripper is not obstructed"
             }
     except Exception as e:
-        return {"status": "error", "error": str(e)}
+        return {
+            "status": "error",
+            "error": str(e),
+            "recovery": "Try resume_after_stop if arm is in error state"
+        }
 
 
 def execute_finish_task(success: bool, summary: str) -> Dict[str, Any]:
@@ -503,15 +530,15 @@ def execute_finish_task(success: bool, summary: str) -> Dict[str, Any]:
 
 
 def execute_resume_after_stop(arm_id: str) -> Dict[str, Any]:
-    """Resume arm operations after error state.
-
-    Args:
-        arm_id: Which arm to resume (follower_right, follower_left)
-    """
+    """Resume arm operations after error state."""
     print(f"[Robot] Resuming {arm_id} after error/stop")
 
     if arm_id not in arm_controllers:
-        return {"status": "error", "error": f"Arm '{arm_id}' not found. Available: {list(arm_controllers.keys())}"}
+        return {
+            "status": "error",
+            "error": f"Arm '{arm_id}' not found",
+            "valid_arms": list(arm_controllers.keys())
+        }
 
     try:
         arm = arm_controllers[arm_id]['arm']
@@ -529,18 +556,15 @@ def execute_resume_after_stop(arm_id: str) -> Dict[str, Any]:
 
 
 def execute_get_arm_state(arm_id: str) -> Dict[str, Any]:
-    """Get current arm state and position.
-
-    Args:
-        arm_id: Which arm (follower_right, follower_left)
-
-    Returns:
-        Dict with position, joints, and state info
-    """
+    """Get current arm state and position."""
     print(f"[Robot] Getting state for {arm_id}")
 
     if arm_id not in arm_controllers:
-        return {"status": "error", "error": f"Arm '{arm_id}' not found. Available: {list(arm_controllers.keys())}"}
+        return {
+            "status": "error",
+            "error": f"Arm '{arm_id}' not found",
+            "valid_arms": list(arm_controllers.keys())
+        }
 
     try:
         arm = arm_controllers[arm_id]['arm']
@@ -565,38 +589,47 @@ def execute_get_arm_state(arm_id: str) -> Dict[str, Any]:
 
 
 def execute_trajectory(arm_id: str, waypoints: List[Dict]) -> Dict[str, Any]:
-    """Execute multi-waypoint trajectory with gripper coordination and checkpoint support.
-
-    Args:
-        arm_id: Which arm (follower_right, follower_left)
-        waypoints: List of waypoint dicts with:
-            - 'point': [x, y, z] position in meters (required)
-            - 'label': descriptive name (optional)
-            - 'gripper_position': 0.0-1.0 gripper position (optional)
-            - 'checkpoint': if True, stop for visual verification (optional)
-
-    Returns:
-        If checkpoint hit: returns status='checkpoint' with current position
-        If completed: returns status='success' or 'partial'
-    """
+    """Execute multi-waypoint trajectory with gripper coordination and checkpoint support."""
     print(f"[Robot] Executing trajectory on {arm_id}: {len(waypoints)} waypoints")
 
     if arm_id not in arm_controllers:
-        return {"status": "error", "error": f"Arm '{arm_id}' not found. Available: {list(arm_controllers.keys())}"}
+        return {
+            "status": "error",
+            "error": f"Arm '{arm_id}' not found",
+            "valid_arms": list(arm_controllers.keys())
+        }
 
     if not waypoints:
-        return {"status": "error", "error": "No waypoints provided"}
+        return {
+            "status": "error",
+            "error": "No waypoints provided",
+            "recovery": "Provide at least one waypoint with {point: [x,y,z], label: 'name'}"
+        }
 
-    # Validate waypoints - must be dicts, not strings
+    # Validate waypoints
     for i, wp in enumerate(waypoints):
         if isinstance(wp, str):
-            return {"status": "error", "error": f"Waypoint {i} is a string instead of an object. Each waypoint must be a JSON object like {{\"point\": [x, y, z], \"label\": \"name\"}}. Received: {wp[:80]}..."}
+            return {
+                "status": "error",
+                "error": f"Waypoint {i} is a string, expected object",
+                "recovery": "Each waypoint must be: {point: [x,y,z], label: 'name'}"
+            }
         if not isinstance(wp, dict):
-            return {"status": "error", "error": f"Waypoint {i} must be an object, got {type(wp).__name__}"}
+            return {
+                "status": "error",
+                "error": f"Waypoint {i} is {type(wp).__name__}, expected object"
+            }
         if 'point' not in wp:
-            return {"status": "error", "error": f"Waypoint {i} missing 'point' field"}
+            return {
+                "status": "error",
+                "error": f"Waypoint {i} missing 'point'",
+                "recovery": "Add point: [x, y, z] to waypoint"
+            }
         if not isinstance(wp['point'], list) or len(wp['point']) != 3:
-            return {"status": "error", "error": f"Waypoint {i} 'point' must be [x, y, z]"}
+            return {
+                "status": "error",
+                "error": f"Waypoint {i} point must be [x, y, z]"
+            }
 
     try:
         arm = arm_controllers[arm_id]['arm']
@@ -637,86 +670,26 @@ def execute_trajectory(arm_id: str, waypoints: List[Dict]) -> Dict[str, Any]:
 
 
 def build_system_instruction(connected_arms: List[str]) -> str:
-    """Build lean system instruction - SDK provides tool docs via schemas."""
+    """Build lean system instruction - technical details are in tool schemas."""
     arm_list = ', '.join(connected_arms)
 
     return f"""You are a robotic manipulation agent controlling ViperX 300s 6-DOF arm(s).
 
 AVAILABLE ARMS: {arm_list}
-Use the appropriate arm_id from the available arms for all function calls.
-
-COORDINATE SYSTEM (meters, relative to robot base):
-+X: Forward | +Y: Right | +Z: Up
--X: Backward | -Y: Left | -Z: Down
-Typical workspace: X: 0.15-0.50m, Y: -0.30 to +0.30m, Z: 0.02-0.40m
-
-GRIPPER PITCH CONTROL:
-When calling move_arm, use pitch_degrees to control how much the gripper tilts down:
-- pitch_degrees: -60 = very steep down (only achievable at low z < 0.25m)
-- pitch_degrees: -45 = steep down (for picking objects at low heights)
-- pitch_degrees: -30 = moderate down (default, works at most positions)
-- pitch_degrees: -15 = gentle down (for viewing/inspection)
-- pitch_degrees: 0 = horizontal (gripper facing forward)
-
-IMPORTANT: Achievable pitch depends on position height:
-- High positions (z > 0.30m): max pitch around -30°
-- Low positions (z < 0.25m): can achieve up to -60°
-If requested pitch is not achievable, it will be relaxed toward horizontal.
-If pitch_degrees is omitted, defaults to -30°. Yaw auto-calculates to face target.
-
-TRAJECTORY TOOL WITH VISUAL CHECKPOINTS:
-For pick-and-place, use execute_trajectory with checkpoints for visual verification.
-
-IMPORTANT: waypoints must be JSON objects (NOT strings). Each waypoint is an object with properties.
-
-Example pick-and-place with checkpoint:
-
-Step 1 - Approach and verify position:
-  execute_trajectory(arm_id, waypoints=[
-    {{"point": [0.35, 0.15, 0.25], "label": "approach", "gripper_position": 1.0}},
-    {{"point": [0.35, 0.15, 0.17], "label": "pre-grasp", "gripper_position": 0.8, "checkpoint": true}}
-  ])
-  -> Stops at pre-grasp checkpoint, returns current_position
-
-Step 2 - Review images. If position is correct, complete the grasp:
-  execute_trajectory(arm_id, waypoints=[
-    {{"point": [0.35, 0.15, 0.15], "label": "grasp", "gripper_position": 0.3}},
-    {{"point": [0.35, 0.15, 0.25], "label": "lift", "gripper_position": 0.3}}
-  ])
-
-Step 3 - If position was off (e.g., 2cm to the right), adjust coordinates:
-  execute_trajectory(arm_id, waypoints=[
-    {{"point": [0.35, 0.13, 0.15], "label": "grasp", "gripper_position": 0.3}},
-    {{"point": [0.35, 0.13, 0.25], "label": "lift", "gripper_position": 0.3}}
-  ])
-
-CHECKPOINT WORKFLOW:
-1. Set checkpoint: true on waypoints where you need visual verification
-2. At checkpoint, execution stops and you receive:
-   - Camera images showing current arm position
-   - Current position coordinates [x, y, z]
-   - Number of waypoints completed/remaining
-3. Review images:
-   - If position looks good: plan next trajectory starting from current position
-   - If adjustment needed: plan new trajectory with corrected coordinates
-   - No special "continue" or "adjust" commands needed - just call execute_trajectory again
-
-GRIPPER CONTROL:
-- Use gripper_position: 0.0 (closed) to 1.0 (open)
-- ~0.3 for grasping small objects, ~0.8 for approach, 1.0 for fully open
-
-CAMERAS:
-- Gripper cameras (left_gripper, right_gripper) are on respective arm grippers
-- Overhead camera provides bird's-eye view of workspace
 
 EXECUTION PROTOCOL:
-1. Estimate object position from camera images
-2. Plan trajectory with checkpoint before critical actions (grasping)
-3. At checkpoint, verify position and adjust if needed
-4. After completion, verify result in images
+1. Use get_arm_state to check current position before planning movements
+2. Use execute_trajectory with checkpoint=true before critical actions (grasping)
+3. At checkpoints, review camera images and adjust coordinates if needed
+4. After actions, verify results in camera images
 5. Call finish_task when complete or impossible
 
-Be precise. Small adjustments (1-2cm) often needed."""
+VISUAL FEEDBACK LOOP:
+- Camera images are provided after every action
+- Small adjustments (1-2cm) are often needed based on visual feedback
+- If position looks off, plan a new trajectory with corrected coordinates
+
+Be precise and verify visually."""
 
 
 # --- GEMINI SESSION MANAGER ---
@@ -820,9 +793,16 @@ class RobotSession:
                 break
 
             candidate = response.candidates[0]
+            finish_reason = getattr(candidate, 'finish_reason', None)
+
+            # Check finish_reason for issues
+            if finish_reason in ('SAFETY', 'RECITATION', 'BLOCKLIST'):
+                print(f"[Session] Response blocked: {finish_reason}")
+                await self._send_ws("error", {"message": f"Response blocked by safety filter: {finish_reason}"})
+                self.active = False
+                break
+
             if candidate.content is None:
-                # This can happen if the response was blocked by safety filters
-                finish_reason = getattr(candidate, 'finish_reason', 'unknown')
                 print(f"[Session] Response content is None (finish_reason: {finish_reason})")
                 await self._send_ws("error", {"message": f"Empty response from model (reason: {finish_reason})"})
                 self.active = False
