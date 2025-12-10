@@ -513,7 +513,8 @@ class GripperController:
             self.dxl.sync_write_positions({self.gripper_motor_id: dynamixel_pos})
 
             if blocking:
-                time.sleep(1.0)
+                # Wait for movement to complete (same as open/close_gripper)
+                time.sleep(1.5)
 
         return self.get_gripper_state()
     def verify_grasp(self) -> Dict:
