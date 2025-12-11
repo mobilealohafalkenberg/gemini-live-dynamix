@@ -695,14 +695,15 @@ EXECUTION PROTOCOL:
 
 VISUAL FEEDBACK LOOP:
 - Camera images are provided after every action
-- Small adjustments (1-2cm) are often needed based on visual feedback
+- Use gripper cameras to plan trajectories and for verifying grasping
+- Use overhead camera for analyzing workspace layout and object detection
 - If position looks off, plan a new trajectory with corrected coordinates
 
 Be precise and verify visually."""
 
 
-# --- GEMINI SESSION MANAGER ---
-ion 
+# --- GEMINI SESSION MANAGER --- 
+
 class RobotSession:
     """
     Manages a single autonomous task execution session.
