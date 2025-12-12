@@ -258,7 +258,7 @@ def build_tool_declarations(connected_arms: List[str]) -> types.Tool:
                         "position": types.Schema(
                             type=types.Type.ARRAY,
                             items=types.Schema(type=types.Type.NUMBER),
-                            description="Target [x, y, z] position in meters. Robot base is origin. +X=forward, +Y=left, +Z=up."
+                            description="Target [x, y, z] in meters. +X=forward, +Z=up, Y=left/right. follower_left: decrease Y to move right. follower_right: increase Y to move left."
                         ),
                         "orientation": types.Schema(
                             type=types.Type.ARRAY,
@@ -369,7 +369,7 @@ def build_tool_declarations(connected_arms: List[str]) -> types.Tool:
                                     "point": types.Schema(
                                         type=types.Type.ARRAY,
                                         items=types.Schema(type=types.Type.NUMBER),
-                                        description="Target [x, y, z] position in meters"
+                                        description="[x, y, z] in meters. follower_left: decrease Y to move right. follower_right: increase Y to move left."
                                     ),
                                     "label": types.Schema(
                                         type=types.Type.STRING,
