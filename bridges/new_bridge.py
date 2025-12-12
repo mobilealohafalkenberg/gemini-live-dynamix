@@ -654,11 +654,15 @@ EXECUTION PROTOCOL:
 4. Call execute_trajectory again with the next waypoint
 5. Call finish_task when complete or impossible
 
-VISUAL FEEDBACK LOOP:
-- Camera images are provided after every waypoint execution
-- Overhead camera is for identifying what objects exist and their general arrangement
-- Use gripper cameras for verifying precise positioning and grasping
-- If position looks off, adjust coordinates for the next waypoint
+CAMERA USAGE (CRITICAL):
+- GRIPPER CAMERA: Use for ALL movement planning and coordinate estimation. Estimate object positions relative to current gripper position. All [x,y,z] coordinates MUST be derived from gripper camera + current arm position.
+- OVERHEAD CAMERA: Use ONLY for object detection and scene understanding (what objects exist, general layout). Do NOT use overhead camera for coordinate estimation.
+
+COORDINATE ESTIMATION RULE:
+1. Get current arm position with get_arm_state
+2. Look at GRIPPER CAMERA to estimate offset to target
+3. Calculate target = current_position + estimated_offset
+4. Never estimate absolute coordinates from overhead camera perspective
 
 Be precise and verify visually after each step."""
 
@@ -895,7 +899,7 @@ class RobotSession:
             ))
         else:
             parts.append(types.Part.from_text(
-                text="Action complete. Examine the new camera images to verify the result."
+                text="Action complete. Use GRIPPER CAMERA to estimate offset to target for next movement."
             ))
 
         return parts
