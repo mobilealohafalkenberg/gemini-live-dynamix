@@ -230,16 +230,6 @@ def capture_encoded_images() -> Dict[str, str]:
     return camera_controller.get_all_frames_base64()
 
 
-def get_camera_description(cam_name: str) -> str:
-    """Get human-readable description of camera view for Gemini context."""
-    descriptions = {
-        'overhead_camera': 'Top-down view of workspace',
-        'right_gripper': 'View from right arm gripper, looking forward',
-        'left_gripper': 'View from left arm gripper, looking forward',
-    }
-    return descriptions.get(cam_name, f'Camera view: {cam_name}')
-
-
 # --- TOOLS DEFINITIONS ---
 # SDK-native FunctionDeclarations with proper Schema definitions
 
@@ -746,12 +736,14 @@ class RobotSession:
         images = capture_encoded_images()
         await self._send_ws("camera_frame", images)
 
-        # 2. Build initial message with task + images
+        # 2. Build initial message with task + images (with camera labels only)
         initial_parts = [types.Part.from_text(text=f"TASK: {self.task_prompt}")]
         for cam_name, b64 in images.items():
             if b64:
                 img_bytes = base64.b64decode(b64)
                 initial_parts.append(types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"))
+                # Add camera name label
+                initial_parts.append(types.Part.from_text(text=f"[{cam_name}]"))
 
         # 3. Add to history
         self.history.append(types.Content(role='user', parts=initial_parts))
@@ -915,14 +907,13 @@ class RobotSession:
             response={"result": result}
         ))
 
-        # Part 2: New camera images (visual verification) with identification
+        # Part 2: New camera images (visual verification) with camera name labels
         for cam_name, b64 in images.items():
             if b64:
                 img_bytes = base64.b64decode(b64)
                 parts.append(types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"))
-                # Add camera identification text after each image
-                cam_desc = get_camera_description(cam_name)
-                parts.append(types.Part.from_text(text=f"[{cam_name}] {cam_desc}"))
+                # Add camera name label
+                parts.append(types.Part.from_text(text=f"[{cam_name}]"))
 
         # Part 3: Context-aware prompt
         if result.get('status') == 'checkpoint':
