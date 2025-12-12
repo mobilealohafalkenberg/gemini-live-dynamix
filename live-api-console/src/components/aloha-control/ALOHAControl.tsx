@@ -302,7 +302,7 @@ export function ALOHAControl({ onRobotStatusChange }: ALOHAControlProps) {
       <div style={{ marginBottom: 12 }}>
         <button
           onClick={handleRobotToggle}
-          disabled={!isConnected || isExecuting}
+          disabled={!isConnected}
           style={{
             padding: '8px 16px',
             borderRadius: 6,

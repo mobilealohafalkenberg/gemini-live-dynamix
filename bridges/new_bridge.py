@@ -43,6 +43,7 @@ camera_controller: Optional[Any] = None
 robot_connected: bool = False  # True after opening ceremony
 ws_clients: set = set()  # Connected WebSocket clients
 ws_sequence: int = 0  # Message sequence number
+active_sessions: Dict[web.WebSocketResponse, Any] = {}  # ws -> active RobotSession
 
 # --- WEBSOCKET HELPERS ---
 
@@ -695,8 +696,8 @@ EXECUTION PROTOCOL:
 
 VISUAL FEEDBACK LOOP:
 - Camera images are provided after every action
-- Use gripper cameras to plan trajectories and for verifying grasping
-- Use overhead camera for analyzing workspace layout and object detection
+- Overhead camera is for identifying what objects exist and their general arrangement 
+- Plan trajectories and for verifying grasping with the gripper cameras
 - If position looks off, plan a new trajectory with corrected coordinates
 
 Be precise and verify visually."""
@@ -733,7 +734,7 @@ class RobotSession:
         self.config = types.GenerateContentConfig(
             system_instruction=self.system_instruction,
             tools=[self.tools],  # Pass Tool object with FunctionDeclarations
-            temperature=0.5,
+            temperature=0.3,
             thinking_config=types.ThinkingConfig(thinking_budget=-1)  # -1 for unlimited thinking
         )
 
@@ -899,6 +900,11 @@ class RobotSession:
                 "summary": f"Task terminated after {self.MAX_STEPS} steps"
             })
 
+        # Clean up session tracking
+        if self.ws in active_sessions:
+            del active_sessions[self.ws]
+            print(f"[Session] Cleaned up session for task: {self.task_prompt[:50]}...")
+
     def _build_function_response(self, func_name: str, result: dict, images: dict) -> list:
         """Build SDK function response + images for next model turn."""
         parts = []
@@ -1053,7 +1059,7 @@ async def handle_ws_robot_connect(ws: web.WebSocketResponse):
 
 
 async def handle_ws_robot_disconnect(ws: web.WebSocketResponse):
-    """Handle robot disconnect - execute closing ceremony on all arms."""
+    """Handle robot disconnect - cancel active sessions and execute closing ceremony."""
     global robot_connected
 
     if not arm_controllers:
@@ -1065,6 +1071,26 @@ async def handle_ws_robot_disconnect(ws: web.WebSocketResponse):
         return
 
     try:
+        # Cancel any active sessions first
+        sessions_cancelled = 0
+        for session_ws, session in list(active_sessions.items()):
+            if session.active:
+                print(f"[WebSocket] Cancelling active session: {session.task_prompt[:50]}...")
+                session.active = False
+                sessions_cancelled += 1
+                await send_ws(session_ws, 'task_complete', {
+                    'success': False,
+                    'summary': 'Task cancelled due to robot disconnect'
+                })
+
+        # Clear all sessions
+        active_sessions.clear()
+
+        if sessions_cancelled > 0:
+            print(f"[WebSocket] Cancelled {sessions_cancelled} active session(s)")
+            # Brief pause to let sessions stop cleanly
+            await asyncio.sleep(0.5)
+
         print("\n[WebSocket] Closing Ceremony")
 
         for arm_id, arm_stack in arm_controllers.items():
@@ -1146,6 +1172,7 @@ async def websocket_handler(request: web.Request):
                         prompt = data.get("payload", {}).get("prompt")
                         if prompt and robot_connected:
                             session = RobotSession(prompt, ws)
+                            active_sessions[ws] = session
                             asyncio.create_task(session.start())
                         elif not robot_connected:
                             await send_ws(ws, 'error', {
@@ -1170,6 +1197,13 @@ async def websocket_handler(request: web.Request):
 
     finally:
         ws_clients.discard(ws)
+        # Clean up any active session for this client
+        if ws in active_sessions:
+            session = active_sessions[ws]
+            if session.active:
+                print(f"[WebSocket] Client disconnected, cancelling session: {session.task_prompt[:50]}...")
+                session.active = False
+            del active_sessions[ws]
 
     return ws
 
