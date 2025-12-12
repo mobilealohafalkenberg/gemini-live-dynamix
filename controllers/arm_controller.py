@@ -1075,91 +1075,63 @@ class ArmController:
         return self._execute_trajectory_sync(waypoints, coordinate_with_gripper)
 
     def _execute_trajectory_sync(self, waypoints: List[Dict], coordinate_with_gripper=None) -> Dict:
-        """Execute trajectory synchronously with checkpoint support.
+        """Execute a single waypoint with optional gripper coordination.
 
         Args:
-            waypoints: List of waypoint dicts with:
+            waypoints: List with single waypoint dict containing:
                 - 'point': [x, y, z] position in meters
                 - 'label': descriptive name (optional)
                 - 'gripper_position': 0.0-1.0 gripper position (optional)
-                - 'checkpoint': if True, stop for visual verification (optional)
             coordinate_with_gripper: Optional gripper controller
 
         Returns:
-            Dict with execution results. If checkpoint hit, returns status='checkpoint' with trajectory state.
+            Dict with execution result.
         """
-        moving_time = self.default_moving_time
-        waypoint_results = []
-        overall_success = True
+        if not waypoints:
+            return {"status": "error", "success": False, "error": "No waypoints provided"}
 
-        print(f"[ArmController] Executing trajectory with {len(waypoints)} waypoints")
+        waypoint = waypoints[0]  # Execute only the first waypoint
+        point = waypoint.get('point', [])
+        label = waypoint.get('label', 'waypoint')
+        gripper_position = waypoint.get('gripper_position')
 
-        for i, waypoint in enumerate(waypoints):
-            point = waypoint.get('point', [])
-            label = waypoint.get('label', f'waypoint_{i}')
-            is_checkpoint = waypoint.get('checkpoint', False)
-            gripper_position = waypoint.get('gripper_position')
+        position = self._convert_waypoint_to_position(point)
+        print(f"[ArmController] Executing waypoint '{label}': {[f'{p:.3f}' for p in position]}")
 
-            # Convert point format if needed
-            position = self._convert_waypoint_to_position(point)
+        # Move arm to waypoint
+        result = self.move_to_position(
+            position=position,
+            moving_time=self.default_moving_time,
+            blocking=True
+        )
 
-            print(f"[ArmController] Waypoint {i+1}/{len(waypoints)} '{label}': {[f'{p:.3f}' for p in position]}"
-                  f"{' [CHECKPOINT]' if is_checkpoint else ''}")
+        # Execute gripper action if position specified and controller provided
+        if gripper_position is not None and coordinate_with_gripper:
+            try:
+                coordinate_with_gripper.set_gripper_position(gripper_position)
+                time.sleep(0.5)
+                print(f"[ArmController] Gripper set to {gripper_position:.2f}")
+            except Exception as e:
+                print(f"[ArmController] Gripper action failed: {e}")
 
-            # Move arm to waypoint
-            result = self.move_to_position(
-                position=position,
-                moving_time=moving_time,
-                blocking=True  # Wait for completion
-            )
-
-            # Execute gripper action if position specified and controller provided
-            if gripper_position is not None and coordinate_with_gripper:
-                try:
-                    coordinate_with_gripper.set_gripper_position(gripper_position)
-                    time.sleep(0.5)
-                    print(f"[ArmController] ✓ Gripper set to {gripper_position:.2f}")
-                except Exception as e:
-                    print(f"[ArmController] ✗ Gripper action failed: {e}")
-
-            waypoint_results.append({
+        if result.get('success'):
+            print(f"[ArmController] Waypoint '{label}' completed")
+            return {
+                'status': 'completed',
+                'success': True,
                 'label': label,
                 'position': position,
                 'gripper_position': gripper_position,
-                'success': result.get('success', False)
-            })
-
-            if not result.get('success', False):
-                overall_success = False
-                print(f"[ArmController] ✗ Trajectory aborted at waypoint '{label}'")
-                break
-
-            # Check for checkpoint AFTER successfully reaching the waypoint
-            if is_checkpoint and i < len(waypoints) - 1:  # Don't checkpoint on last waypoint
-                remaining_waypoints = waypoints[i + 1:]
-                print(f"[ArmController] Checkpoint reached at '{label}'. Stopping for visual feedback.")
-
-                return {
-                    'status': 'checkpoint',
-                    'label': label,
-                    'current_position': position,
-                    'waypoints_completed': waypoint_results,
-                    'remaining_waypoints': len(remaining_waypoints),
-                    'total_waypoints': len(waypoints),
-                    'message': f"Checkpoint at '{label}'. Review images and plan next trajectory."
-                }
-
-        # Trajectory completed (no checkpoint or final waypoint)
-        completion_msg = f"✓ Completed {len(waypoint_results)}/{len(waypoints)} waypoints" if overall_success else f"✗ Failed at waypoint {len(waypoint_results)}"
-        print(f"[ArmController] {completion_msg}")
-
-        return {
-            'status': 'completed' if overall_success else 'failed',
-            'success': overall_success,
-            'waypoints_completed': waypoint_results,
-            'total_waypoints': len(waypoints),
-            'final_state': self.get_arm_state()
-        }
+                'final_state': self.get_arm_state()
+            }
+        else:
+            print(f"[ArmController] Waypoint '{label}' failed: {result.get('error', 'Unknown error')}")
+            return {
+                'status': 'failed',
+                'success': False,
+                'label': label,
+                'error': result.get('error', 'Movement failed')
+            }
 
     def get_arm_state(self) -> Dict:
         """

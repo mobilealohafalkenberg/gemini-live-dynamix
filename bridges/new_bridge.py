@@ -350,10 +350,10 @@ def build_tool_declarations(connected_arms: List[str]) -> types.Tool:
                 )
             ),
 
-            # execute_trajectory - Multi-waypoint manipulation sequences with checkpoints
+            # execute_trajectory - Single waypoint execution with visual feedback
             types.FunctionDeclaration(
                 name="execute_trajectory",
-                description="Execute a multi-waypoint trajectory with gripper coordination and visual checkpoints. Set checkpoint=true on waypoints where you need to see camera images before continuing. At checkpoints, execution stops and returns current position - review images and call execute_trajectory again with next waypoints.",
+                description="Execute a single waypoint movement with optional gripper action. Returns camera images for visual verification after completion. Call repeatedly for multi-step tasks - review images between each call to adjust coordinates if needed.",
                 parameters=types.Schema(
                     type=types.Type.OBJECT,
                     properties={
@@ -361,35 +361,27 @@ def build_tool_declarations(connected_arms: List[str]) -> types.Tool:
                             type=types.Type.STRING,
                             description=arm_enum_desc
                         ),
-                        "waypoints": types.Schema(
-                            type=types.Type.ARRAY,
-                            items=types.Schema(
-                                type=types.Type.OBJECT,
-                                properties={
-                                    "point": types.Schema(
-                                        type=types.Type.ARRAY,
-                                        items=types.Schema(type=types.Type.NUMBER),
-                                        description="[x, y, z] in meters. follower_left: decrease Y to move right. follower_right: increase Y to move left."
-                                    ),
-                                    "label": types.Schema(
-                                        type=types.Type.STRING,
-                                        description="Descriptive name (e.g., 'approach', 'pre-grasp', 'grasp', 'lift')"
-                                    ),
-                                    "gripper_position": types.Schema(
-                                        type=types.Type.NUMBER,
-                                        description="Gripper position: 0.0 (closed) to 1.0 (open). Use ~0.3 for grasping, ~0.8 for approach."
-                                    ),
-                                    "checkpoint": types.Schema(
-                                        type=types.Type.BOOLEAN,
-                                        description="If true, stop at this waypoint and return camera images. Review images, then call execute_trajectory again with remaining waypoints."
-                                    )
-                                },
-                                required=["point", "label"]
-                            ),
-                            description="Ordered list of waypoints. Set checkpoint=true before critical actions (e.g., before grasping) to verify position."
+                        "waypoint": types.Schema(
+                            type=types.Type.OBJECT,
+                            properties={
+                                "point": types.Schema(
+                                    type=types.Type.ARRAY,
+                                    items=types.Schema(type=types.Type.NUMBER),
+                                    description="[x, y, z] in meters. follower_left: decrease Y to move right. follower_right: increase Y to move left."
+                                ),
+                                "label": types.Schema(
+                                    type=types.Type.STRING,
+                                    description="Descriptive name (e.g., 'approach', 'pre-grasp', 'grasp', 'lift')"
+                                ),
+                                "gripper_position": types.Schema(
+                                    type=types.Type.NUMBER,
+                                    description="Gripper position: 0.0 (closed) to 1.0 (open). Use ~0.3 for grasping, ~0.8 for approach."
+                                )
+                            },
+                            required=["point", "label"]
                         ),
                     },
-                    required=["arm_id", "waypoints"]
+                    required=["arm_id", "waypoint"]
                 )
             )
         ]
@@ -426,11 +418,6 @@ def execute_move_arm(arm_id: str, position: List[float], orientation: Optional[L
     try:
         arm = arm_controllers[arm_id]['arm']
 
-        # Get starting position
-        start_state = arm.get_arm_state()
-        start_ee = start_state.get('ee_position', {})
-        start_position = [start_ee.get('x', 0), start_ee.get('y', 0), start_ee.get('z', 0)]
-
         result = arm.move_to_position(position, orientation=orientation, pitch_degrees=pitch_degrees, moving_time=moving_time, blocking=True)
         if result.get('success'):
             # Get final position
@@ -440,7 +427,6 @@ def execute_move_arm(arm_id: str, position: List[float], orientation: Optional[L
 
             response = {
                 "status": "success",
-                "start_position": start_position,
                 "final_position": final_position,
                 "target_position": position,
                 "message": "Movement complete. Verify alignment in camera images."
@@ -589,9 +575,10 @@ def execute_get_arm_state(arm_id: str) -> Dict[str, Any]:
         return {"status": "error", "error": str(e)}
 
 
-def execute_trajectory(arm_id: str, waypoints: List[Dict]) -> Dict[str, Any]:
-    """Execute multi-waypoint trajectory with gripper coordination and checkpoint support."""
-    print(f"[Robot] Executing trajectory on {arm_id}: {len(waypoints)} waypoints")
+def execute_trajectory(arm_id: str, waypoint: Dict) -> Dict[str, Any]:
+    """Execute a single waypoint movement with optional gripper action."""
+    label = waypoint.get('label', 'waypoint')
+    print(f"[Robot] Executing waypoint '{label}' on {arm_id}")
 
     if arm_id not in arm_controllers:
         return {
@@ -600,70 +587,53 @@ def execute_trajectory(arm_id: str, waypoints: List[Dict]) -> Dict[str, Any]:
             "valid_arms": list(arm_controllers.keys())
         }
 
-    if not waypoints:
+    if not waypoint:
         return {
             "status": "error",
-            "error": "No waypoints provided",
-            "recovery": "Provide at least one waypoint with {point: [x,y,z], label: 'name'}"
+            "error": "No waypoint provided",
+            "recovery": "Provide a waypoint with {point: [x,y,z], label: 'name'}"
         }
 
-    # Validate waypoints
-    for i, wp in enumerate(waypoints):
-        if isinstance(wp, str):
-            return {
-                "status": "error",
-                "error": f"Waypoint {i} is a string, expected object",
-                "recovery": "Each waypoint must be: {point: [x,y,z], label: 'name'}"
-            }
-        if not isinstance(wp, dict):
-            return {
-                "status": "error",
-                "error": f"Waypoint {i} is {type(wp).__name__}, expected object"
-            }
-        if 'point' not in wp:
-            return {
-                "status": "error",
-                "error": f"Waypoint {i} missing 'point'",
-                "recovery": "Add point: [x, y, z] to waypoint"
-            }
-        if not isinstance(wp['point'], list) or len(wp['point']) != 3:
-            return {
-                "status": "error",
-                "error": f"Waypoint {i} point must be [x, y, z]"
-            }
+    # Validate waypoint
+    if not isinstance(waypoint, dict):
+        return {
+            "status": "error",
+            "error": f"Waypoint is {type(waypoint).__name__}, expected object"
+        }
+    if 'point' not in waypoint:
+        return {
+            "status": "error",
+            "error": "Waypoint missing 'point'",
+            "recovery": "Add point: [x, y, z] to waypoint"
+        }
+    if not isinstance(waypoint['point'], list) or len(waypoint['point']) != 3:
+        return {
+            "status": "error",
+            "error": "Waypoint point must be [x, y, z]"
+        }
 
     try:
         arm = arm_controllers[arm_id]['arm']
         gripper = arm_controllers[arm_id]['gripper']
 
         result = arm.execute_trajectory(
-            waypoints=waypoints,
+            waypoints=[waypoint],  # Wrap single waypoint in list for arm controller
             coordinate_with_gripper=gripper
         )
 
-        # Check if we hit a checkpoint
-        if result.get('status') == 'checkpoint':
-            return {
-                "status": "checkpoint",
-                "label": result.get('label'),
-                "current_position": result.get('current_position'),
-                "waypoints_completed": len(result.get('waypoints_completed', [])),
-                "waypoints_remaining": result.get('remaining_waypoints', 0),
-                "message": "Checkpoint reached. Review images and plan next trajectory from current position."
-            }
-
-        # Normal completion
         if result.get('success') or result.get('status') == 'completed':
             return {
                 "status": "success",
-                "waypoints_completed": result.get('total_waypoints', len(waypoints)),
-                "message": "Trajectory complete. Verify in camera images."
+                "label": result.get('label', label),
+                "position": result.get('position'),
+                "gripper_position": result.get('gripper_position'),
+                "message": f"Waypoint '{label}' complete. Review images and continue."
             }
         else:
             return {
-                "status": "partial",
-                "waypoints_completed": len(result.get('waypoints_completed', [])),
-                "error": result.get('error', 'Trajectory incomplete')
+                "status": "failed",
+                "label": label,
+                "error": result.get('error', 'Movement failed')
             }
     except Exception as e:
         return {"status": "error", "error": str(e)}
@@ -679,18 +649,18 @@ AVAILABLE ARMS: {arm_list}
 
 EXECUTION PROTOCOL:
 1. Use get_arm_state to check current position before planning movements
-2. Use execute_trajectory with checkpoint=true before critical actions (grasping)
-3. At checkpoints, review camera images and adjust coordinates if needed
-4. After actions, verify results in camera images
+2. Use execute_trajectory with ONE waypoint at a time - you will receive camera images after each movement
+3. Review camera images after each movement and adjust coordinates if needed before the next waypoint
+4. Call execute_trajectory again with the next waypoint
 5. Call finish_task when complete or impossible
 
 VISUAL FEEDBACK LOOP:
-- Camera images are provided after every action
-- Overhead camera is for identifying what objects exist and their general arrangement 
-- Plan trajectories and for verifying grasping with the gripper cameras
-- If position looks off, plan a new trajectory with corrected coordinates
+- Camera images are provided after every waypoint execution
+- Overhead camera is for identifying what objects exist and their general arrangement
+- Use gripper cameras for verifying precise positioning and grasping
+- If position looks off, adjust coordinates for the next waypoint
 
-Be precise and verify visually."""
+Be precise and verify visually after each step."""
 
 
 # --- GEMINI SESSION MANAGER --- 
@@ -916,12 +886,12 @@ class RobotSession:
                 parts.append(types.Part.from_text(text=f"[{cam_name}]"))
 
         # Part 3: Context-aware prompt
-        if result.get('status') == 'checkpoint':
-            label = result.get('label', 'checkpoint')
-            current_pos = result.get('current_position', [])
+        label = result.get('label', 'action')
+        position = result.get('position', [])
+        if position:
             parts.append(types.Part.from_text(
-                text=f"CHECKPOINT at '{label}'. Current position: {current_pos}. "
-                     f"Review images and plan next trajectory from this position."
+                text=f"Waypoint '{label}' complete. Position: {[f'{p:.3f}' for p in position]}. "
+                     f"Review images and continue with next waypoint."
             ))
         else:
             parts.append(types.Part.from_text(
@@ -964,7 +934,7 @@ class RobotSession:
                 return await asyncio.to_thread(
                     execute_trajectory,
                     args.get('arm_id'),
-                    args.get('waypoints', [])
+                    args.get('waypoint', {})
                 )
             else:
                 return {"status": "error", "error": f"Unknown tool: {name}"}
