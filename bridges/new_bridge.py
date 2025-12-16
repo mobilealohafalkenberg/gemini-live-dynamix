@@ -383,6 +383,26 @@ def build_tool_declarations(connected_arms: List[str]) -> types.Tool:
                     },
                     required=["arm_id", "waypoint"]
                 )
+            ),
+
+            # move_to_pose - Move to predefined named pose
+            types.FunctionDeclaration(
+                name="move_to_pose",
+                description="Move arm to a predefined named pose. Use 'ready' for starting manipulation tasks, 'home' for a neutral position, or 'sleep' for parking the arm safely.",
+                parameters=types.Schema(
+                    type=types.Type.OBJECT,
+                    properties={
+                        "arm_id": types.Schema(
+                            type=types.Type.STRING,
+                            description=arm_enum_desc
+                        ),
+                        "pose": types.Schema(
+                            type=types.Type.STRING,
+                            description="Named pose: 'ready' (forward-facing, good for manipulation), 'home' (neutral upright position), or 'sleep' (compact parking position)"
+                        )
+                    },
+                    required=["arm_id", "pose"]
+                )
             )
         ]
     )
@@ -637,6 +657,61 @@ def execute_trajectory(arm_id: str, waypoint: Dict) -> Dict[str, Any]:
             }
     except Exception as e:
         return {"status": "error", "error": str(e)}
+
+
+def execute_move_to_pose(arm_id: str, pose: str) -> Dict[str, Any]:
+    """Execute move_to_pose tool - move arm to a predefined named pose.
+
+    Args:
+        arm_id: Which arm (follower_right, follower_left)
+        pose: Named pose ('home', 'sleep', 'ready')
+    """
+    print(f"[Robot] Moving {arm_id} to '{pose}' pose")
+
+    if arm_id not in arm_controllers:
+        return {
+            "status": "error",
+            "error": f"Arm '{arm_id}' not found",
+            "valid_arms": list(arm_controllers.keys()),
+            "recovery": "Use a valid arm_id from valid_arms"
+        }
+
+    valid_poses = ['home', 'sleep', 'ready']
+    if pose not in valid_poses:
+        return {
+            "status": "error",
+            "error": f"Unknown pose '{pose}'",
+            "valid_poses": valid_poses,
+            "recovery": f"Use one of: {', '.join(valid_poses)}"
+        }
+
+    try:
+        arm = arm_controllers[arm_id]['arm']
+        result = arm.move_to_pose(pose, blocking=True)
+
+        if result.get('success'):
+            # Get final position for reference
+            final_state = arm.get_arm_state()
+            final_ee = final_state.get('ee_position', {})
+
+            return {
+                "status": "success",
+                "pose": pose,
+                "position": [final_ee.get('x', 0), final_ee.get('y', 0), final_ee.get('z', 0)],
+                "message": f"Arm now at '{pose}' pose. Ready for next command."
+            }
+        else:
+            return {
+                "status": "error",
+                "error": result.get('error', 'Move to pose failed'),
+                "recovery": "Try resume_after_stop if arm is in error state"
+            }
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e),
+            "recovery": "Try resume_after_stop if arm is in error state"
+        }
 
 
 def build_system_instruction(connected_arms: List[str]) -> str:
@@ -939,6 +1014,12 @@ class RobotSession:
                     execute_trajectory,
                     args.get('arm_id'),
                     args.get('waypoint', {})
+                )
+            elif name == "move_to_pose":
+                return await asyncio.to_thread(
+                    execute_move_to_pose,
+                    args.get('arm_id'),
+                    args.get('pose')
                 )
             else:
                 return {"status": "error", "error": f"Unknown tool: {name}"}

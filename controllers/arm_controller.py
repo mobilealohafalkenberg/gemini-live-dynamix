@@ -70,6 +70,11 @@ class ArmController:
         # Hardware allows ±180°, but we track to prevent cumulative rotation
         'max_wrist_rotation': math.radians(180),  # ±180° limit per move
     }
+
+    # TCP (Tool Center Point) offset: distance from wrist frame to gripper fingertips
+    # This ensures that when a target position is given, the gripper fingertips
+    # end up at that position (not the wrist). Measured along gripper's forward axis.
+    TCP_OFFSET = 0.11  # 11cm from wrist to fingertip grasp point
     
     def __init__(self, dynamixel_controller: Optional[DynamixelController] = None,
                  robot_model: Optional[VX300S] = None,
@@ -533,8 +538,10 @@ class ArmController:
         Standard robotics approach: try exact orientation first, then progressively
         relax pitch toward horizontal until IK succeeds.
 
+        Automatically applies TCP offset so gripper fingertips reach the target position.
+
         Args:
-            position: Target position dict with x, y, z
+            position: Target position dict with x, y, z (where fingertips should go)
             orientation: Desired [roll, pitch, yaw] in radians
             current_joints: Current joint positions for IK guess
             max_pitch_relaxation: Maximum pitch adjustment allowed (radians)
@@ -564,7 +571,20 @@ class ArmController:
                 test_pitch = max(desired_pitch - relaxation, 0.0)
 
             test_orientation = [roll, test_pitch, yaw]
-            T_target = self._build_transformation_matrix(position, test_orientation)
+
+            # Apply TCP offset: move target backward along approach direction
+            # so gripper fingertips end up at the original target position
+            approach_x = math.cos(yaw) * math.cos(test_pitch)
+            approach_y = math.sin(yaw) * math.cos(test_pitch)
+            approach_z = -math.sin(test_pitch)
+
+            ik_position = {
+                'x': position['x'] - self.TCP_OFFSET * approach_x,
+                'y': position['y'] - self.TCP_OFFSET * approach_y,
+                'z': position['z'] - self.TCP_OFFSET * approach_z
+            }
+
+            T_target = self._build_transformation_matrix(ik_position, test_orientation)
 
             joint_list, success = self._compute_ik_with_preference(
                 T_target,
