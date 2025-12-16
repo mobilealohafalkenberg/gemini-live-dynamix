@@ -966,8 +966,8 @@ class RobotSession:
 
         # Part 3: Context-aware prompt
         label = result.get('label', 'action')
-        position = result.get('position', [])
-        if position:
+        position = result.get('position')
+        if isinstance(position, list) and len(position) == 3:
             parts.append(types.Part.from_text(
                 text=f"Waypoint '{label}' complete. Position: {[f'{p:.3f}' for p in position]}. "
                      f"Review images and continue with next waypoint."
