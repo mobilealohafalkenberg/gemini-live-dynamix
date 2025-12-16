@@ -730,7 +730,7 @@ EXECUTION PROTOCOL:
 5. Call finish_task when complete or impossible
 
 CAMERA USAGE (CRITICAL):
-- GRIPPER CAMERA: Use for ALL movement planning and coordinate estimation. Estimate object positions relative to current gripper position. All [x,y,z] coordinates MUST be derived from gripper camera + current arm position.
+- GRIPPER CAMERA: Mounted ~5cm BEHIND the gripper fingers. For grasping, objects must fill at least 50% of the camera frame - if the object appears smaller, you are too far away. Use for ALL movement planning and coordinate estimation.
 - OVERHEAD CAMERA: Use ONLY for object detection and scene understanding (what objects exist, general layout). Do NOT use overhead camera for coordinate estimation.
 
 COORDINATE ESTIMATION RULE:
