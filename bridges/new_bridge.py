@@ -44,6 +44,7 @@ robot_connected: bool = False  # True after opening ceremony
 ws_clients: set = set()  # Connected WebSocket clients
 ws_sequence: int = 0  # Message sequence number
 active_sessions: Dict[web.WebSocketResponse, Any] = {}  # ws -> active RobotSession
+client_chats: Dict[web.WebSocketResponse, Any] = {}  # ws -> persistent Chat session
 
 # --- WEBSOCKET HELPERS ---
 
@@ -97,13 +98,23 @@ def initialize_hardware(allowed_cameras: Optional[List[str]] = None) -> bool:
     Args:
         allowed_cameras: Optional list of camera names to initialize.
                         If provided, only cameras with names in this list will be initialized.
-                        If None, all detected cameras are initialized.
-                        Example: ['gripper_left', 'gripper_right'] to exclude overhead camera.
+                        Arms are automatically filtered based on camera selection:
+                        - 'right_gripper' -> initializes 'follower_right'
+                        - 'left_gripper' -> initializes 'follower_left'
+                        - 'overhead_camera' -> no arm association
+                        If None, all detected cameras and arms are initialized.
 
     Returns:
         True if at least one arm was successfully initialized
     """
     global arm_controllers, camera_controller
+
+    # Camera to arm mapping
+    CAMERA_TO_ARM = {
+        'right_gripper': 'follower_right',
+        'left_gripper': 'follower_left',
+        # overhead_camera has no arm association
+    }
 
     if not ROBOT_HARDWARE_AVAILABLE:
         logging.warning("Robot hardware modules not available - running in mock mode")
@@ -120,6 +131,21 @@ def initialize_hardware(allowed_cameras: Optional[List[str]] = None) -> bool:
     if not detected_arms:
         logging.warning("No follower arms detected. Check USB connections and udev rules.")
         return False
+
+    # Filter arms based on camera selection
+    if allowed_cameras is not None:
+        # Derive which arms to initialize from selected cameras
+        allowed_arms = set()
+        for cam in allowed_cameras:
+            if cam in CAMERA_TO_ARM:
+                allowed_arms.add(CAMERA_TO_ARM[cam])
+
+        if allowed_arms:
+            filtered_arms = [a for a in detected_arms if a['arm_id'] in allowed_arms]
+            skipped = [a['arm_id'] for a in detected_arms if a['arm_id'] not in allowed_arms]
+            if skipped:
+                print(f"[Detection] Skipping arms (no matching camera selected): {skipped}")
+            detected_arms = filtered_arms
 
     # Initialize each detected arm
     config_path = Path(__file__).parent.parent / 'config' / 'vx300s.yaml'
@@ -757,8 +783,8 @@ class RobotSession:
     """
     Manages a single autonomous task execution session.
 
-    Uses models.generate_content() with explicit history management
-    instead of chats.create() to avoid SDK state confusion.
+    Uses SDK Chat Sessions (client.chats.create()) for automatic history management.
+    Chat sessions persist per WebSocket connection to maintain context across tasks.
     """
 
     MAX_STEPS = 20  # Maximum steps before forced termination
@@ -770,21 +796,27 @@ class RobotSession:
         self.active = True
         self.step = 0
 
-        # Explicit conversation history (not SDK-managed)
-        self.history: List[types.Content] = []
-
         # Build dynamic system instruction and tools
         connected_arms = list(arm_controllers.keys())
         self.system_instruction = build_system_instruction(connected_arms)
         self.tools = build_tool_declarations(connected_arms)
 
-        # Config for all API calls - with SDK native tool calling
+        # Config for chat session
         self.config = types.GenerateContentConfig(
             system_instruction=self.system_instruction,
             tools=[self.tools],  # Pass Tool object with FunctionDeclarations
             temperature=0.3,
             thinking_config=types.ThinkingConfig(thinking_budget=-1)  # -1 for unlimited thinking
         )
+
+        # Get or create persistent chat session for this WebSocket
+        # This preserves context across multiple tasks from the same client
+        if ws not in client_chats:
+            client_chats[ws] = self.client.chats.create(
+                model='gemini-robotics-er-1.5-preview',
+                config=self.config
+            )
+        self.chat = client_chats[ws]
 
     async def start(self):
         """Initialize and run the task execution loop."""
@@ -803,22 +835,23 @@ class RobotSession:
                 # Add camera name label
                 initial_parts.append(types.Part.from_text(text=f"[{cam_name}]"))
 
-        # 3. Add to history
-        self.history.append(types.Content(role='user', parts=initial_parts))
+        # 3. Store initial message for first loop iteration
+        # Chat session will auto-manage history when we call send_message
+        self.pending_message = initial_parts
 
         # 4. Run the execution loop
         await self._execute_loop()
 
     async def _execute_loop(self):
         """
-        Main execution loop with SDK native tool calling.
+        Main execution loop with SDK Chat Sessions.
 
         Pattern:
-        1. Call Gemini (stateless API with tools)
+        1. Send pending message via chat.send_message() (SDK auto-manages history)
         2. Process Part.function_call from response
         3. Execute function
         4. Capture new images
-        5. Send Part.from_function_response + images back
+        5. Build Part.from_function_response + images as next pending message
         6. Repeat until finish_task is called
         """
         while self.step < self.MAX_STEPS and self.active:
@@ -833,12 +866,10 @@ class RobotSession:
             print(f"[Gemini] Step {self.step}/{self.MAX_STEPS} - Calling model...")
 
             try:
-                # 1. Call Gemini (stateless - pass full history each time)
+                # 1. Send message via Chat Session (SDK auto-manages history)
                 response = await asyncio.to_thread(
-                    self.client.models.generate_content,
-                    model='gemini-robotics-er-1.5-preview',
-                    contents=self.history,
-                    config=self.config
+                    self.chat.send_message,
+                    self.pending_message
                 )
             except Exception as e:
                 logging.error(f"Gemini API error: {e}")
@@ -869,8 +900,7 @@ class RobotSession:
                 self.active = False
                 break
 
-            # Store response in history
-            self.history.append(candidate.content)
+            # Note: SDK Chat Session automatically stores response in history
 
             # 3. Process response parts - look for function_call and text
             function_call = None
@@ -938,8 +968,8 @@ class RobotSession:
             await self._send_ws("camera_frame", new_images)
 
             # 9. Build function response + images for next turn
-            response_parts = self._build_function_response(func_name, exec_result, new_images)
-            self.history.append(types.Content(role='user', parts=response_parts))
+            # Store as pending_message for next iteration (SDK will add to history on send)
+            self.pending_message = self._build_function_response(func_name, exec_result, new_images)
 
         # Loop ended - check why
         if self.step >= self.MAX_STEPS and self.active:
@@ -1252,6 +1282,10 @@ async def websocket_handler(request: web.Request):
 
     finally:
         ws_clients.discard(ws)
+        # Clean up chat session for this client (clears Gemini context)
+        if ws in client_chats:
+            del client_chats[ws]
+            print("[WebSocket] Cleared chat session (context reset)")
         # Clean up any active session for this client
         if ws in active_sessions:
             session = active_sessions[ws]
@@ -1301,7 +1335,8 @@ if __name__ == '__main__':
     parser.add_argument('--port', type=int, default=8082, help='Server port (default: 8082)')
     parser.add_argument('--no-robot', action='store_true', help='Run without robot hardware (mock mode)')
     parser.add_argument('--cameras', type=str, nargs='*', default=None,
-                       help='Camera names to use (default: all). Example: --cameras gripper_left gripper_right')
+                       help='Camera names to use (default: all). Arms are auto-selected based on cameras. '
+                            'Example: --cameras right_gripper (uses only right arm)')
     args = parser.parse_args()
 
     print("\n" + "=" * 60)
