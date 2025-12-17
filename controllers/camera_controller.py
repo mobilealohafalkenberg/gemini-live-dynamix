@@ -71,10 +71,16 @@ class CameraController:
         except Exception as e:
             print(f"[CameraController] Error loading config: {e}")
 
-    def initialize(self) -> bool:
+    def initialize(self, allowed_cameras: Optional[List[str]] = None) -> bool:
         """
         Initialize RealSense cameras with RGB streams.
         Uses dynamic detection - initializes any available cameras.
+
+        Args:
+            allowed_cameras: Optional list of camera names to initialize.
+                           If provided, only cameras with names in this list
+                           (from config serial_to_name mapping) will be initialized.
+                           If None, all detected cameras are initialized.
 
         Returns:
             True if at least one camera initialized successfully
@@ -95,6 +101,11 @@ class CameraController:
                 serial = dev.get_info(rs.camera_info.serial_number)
                 # Use config name if available, otherwise fall back to generic name
                 name = self.serial_to_name.get(serial, f'camera_{i}')
+
+                # Skip camera if not in allowed list (when filtering is enabled)
+                if allowed_cameras is not None and name not in allowed_cameras:
+                    print(f"[CameraController] Skipping {name} (not in allowed list: {allowed_cameras})")
+                    continue
 
                 print(f"[CameraController] Initializing {name} (serial: {serial})")
 

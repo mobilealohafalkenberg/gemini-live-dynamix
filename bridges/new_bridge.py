@@ -90,9 +90,15 @@ async def broadcast_ws(msg_type: str, payload: dict):
 
 # --- HARDWARE INITIALIZATION ---
 
-def initialize_hardware() -> bool:
+def initialize_hardware(allowed_cameras: Optional[List[str]] = None) -> bool:
     """
     Initialize robot hardware - detect and set up all follower arms and cameras.
+
+    Args:
+        allowed_cameras: Optional list of camera names to initialize.
+                        If provided, only cameras with names in this list will be initialized.
+                        If None, all detected cameras are initialized.
+                        Example: ['gripper_left', 'gripper_right'] to exclude overhead camera.
 
     Returns:
         True if at least one arm was successfully initialized
@@ -182,10 +188,13 @@ def initialize_hardware() -> bool:
             traceback.print_exc()
 
     # Initialize cameras
-    print(f"\n[Cameras] Initializing...")
+    if allowed_cameras is not None:
+        print(f"\n[Cameras] Initializing (filter: {allowed_cameras})...")
+    else:
+        print(f"\n[Cameras] Initializing (all cameras)...")
     try:
         camera_controller = CameraController()
-        if camera_controller.initialize():
+        if camera_controller.initialize(allowed_cameras=allowed_cameras):
             print(f"  ✓ Cameras: {camera_controller.get_camera_names()}")
         else:
             logging.warning("Camera initialization failed")
@@ -1291,6 +1300,8 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Gemini Robotics ER Bridge')
     parser.add_argument('--port', type=int, default=8082, help='Server port (default: 8082)')
     parser.add_argument('--no-robot', action='store_true', help='Run without robot hardware (mock mode)')
+    parser.add_argument('--cameras', type=str, nargs='*', default=None,
+                       help='Camera names to use (default: all). Example: --cameras gripper_left gripper_right')
     args = parser.parse_args()
 
     print("\n" + "=" * 60)
@@ -1312,7 +1323,7 @@ if __name__ == '__main__':
 
     # Initialize hardware at startup
     if not args.no_robot:
-        initialize_hardware()
+        initialize_hardware(allowed_cameras=args.cameras)
     else:
         print("[Bridge] Running in mock mode (--no-robot)")
 
