@@ -60,7 +60,15 @@ class ArmController:
     POSES = {
         'home': [0.0, -0.3, 0.6, 0.0, -0.3, 0.0],
         'sleep': [0.0, -1.69, 1.55, 0.0, 0.8, 0.0],
-        'ready': [0.0, -0.96, 1.16, 0.0, -0.3, 0.0],
+        'ready': [0.0, -0.96, 1.16, 0.0, 0.6, 0.0],
+    }
+
+    # Arm-specific waist offsets for ready pose (radians)
+    # Left arm points right (negative waist), right arm points left (positive waist)
+    # This makes both arms point inward toward the workspace
+    ARM_READY_WAIST_OFFSET = {
+        'follower_left': -0.4,  # ~23° to the right (inward)
+        'follower_right': 0.4,  # ~23° to the left (inward)
     }
     
     # Safety: Only limit wrist rotation to prevent continuous spinning (cable wrap)
@@ -73,17 +81,20 @@ class ArmController:
     
     def __init__(self, dynamixel_controller: Optional[DynamixelController] = None,
                  robot_model: Optional[VX300S] = None,
+                 arm_id: Optional[str] = None,
                  enable_safety=True, dry_run=False):
         """Initialize controller (does not connect to robot yet)
 
         Args:
             dynamixel_controller: Shared DynamixelController instance
             robot_model: VX300S kinematics model (created if not provided)
+            arm_id: Arm identifier ('follower_left' or 'follower_right') for arm-specific behavior
             enable_safety: Enable safety validation
             dry_run: If True, validate but don't execute movements
         """
         self.dxl = dynamixel_controller  # Shared DynamixelController
         self.model = robot_model or VX300S()  # Kinematics model
+        self.arm_id = arm_id  # For arm-specific pose adjustments
         self.initialized = False
         self.current_state = ArmState.UNKNOWN
         self.current_joints = [0.0] * 6
@@ -895,9 +906,17 @@ class ArmController:
 
         if pose_name not in self.POSES:
             return {"success": False, "error": f"Unknown pose: {pose_name}", "state": "error"}
-        
+
+        # Get base pose and apply arm-specific adjustments
+        pose_joints = list(self.POSES[pose_name])  # Copy to avoid modifying class constant
+
+        # Apply arm-specific waist offset for ready pose
+        if pose_name == 'ready' and self.arm_id in self.ARM_READY_WAIST_OFFSET:
+            waist_offset = self.ARM_READY_WAIST_OFFSET[self.arm_id]
+            pose_joints[0] += waist_offset
+            print(f"[ArmController] Applying {self.arm_id} waist offset: {math.degrees(waist_offset):.1f}°")
+
         # Safety check the named pose (these should always be safe, but check anyway)
-        pose_joints = self.POSES[pose_name]
         is_safe, warning = self.check_safety_constraints(pose_joints)
         if not is_safe:
             print(f"[ArmController] ⚠️ WARNING: Named pose '{pose_name}' failed safety check: {warning}")

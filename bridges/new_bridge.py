@@ -174,10 +174,11 @@ def initialize_hardware(allowed_cameras: Optional[List[str]] = None) -> bool:
             dxl_controller.enable_torque()
             dxl_controller.start_monitoring(frequency=10)
 
-            # Initialize ArmController
+            # Initialize ArmController with arm_id for arm-specific behavior
             arm_ctrl = ArmController(
                 dynamixel_controller=dxl_controller,
                 robot_model=robot_model,
+                arm_id=arm_id,  # For arm-specific ready pose (inward waist rotation)
                 enable_safety=True,
                 dry_run=False
             )
@@ -241,12 +242,9 @@ def shutdown_hardware():
 
     print("\n[Bridge] Shutting down robot...")
 
-    ALL_MOTOR_IDS = [1, 2, 3, 4, 5, 6, 7, 8, 9]
-
     for arm_id, ctrl in arm_controllers.items():
         try:
-            print(f"  [{arm_id}] Disabling torque...")
-            ctrl['dxl'].disable_torque(ALL_MOTOR_IDS)
+            print(f"  [{arm_id}] Closing connection...")
             ctrl['dxl'].stop_monitoring()
             ctrl['dxl'].close()
         except Exception as e:
@@ -765,7 +763,7 @@ EXECUTION PROTOCOL:
 5. Call finish_task when complete or impossible
 
 CAMERA USAGE (CRITICAL):
-- GRIPPER CAMERA: Mounted ~5cm BEHIND the gripper fingers. For grasping, objects must fill at least 50% of the camera frame - if the object appears smaller, you are too far away. Use for ALL movement planning and coordinate estimation.
+- GRIPPER CAMERA: If the object appears smaller, you are too far away. Use for ALL movement planning and coordinate estimation.
 - OVERHEAD CAMERA: Use ONLY for object detection and scene understanding (what objects exist, general layout). Do NOT use overhead camera for coordinate estimation.
 
 COORDINATE ESTIMATION RULE:
@@ -774,7 +772,7 @@ COORDINATE ESTIMATION RULE:
 3. Calculate target = current_position + estimated_offset
 4. Never estimate absolute coordinates from overhead camera perspective
 
-Be precise and verify visually after each step."""
+Visually after each step."""
 
 
 # --- GEMINI SESSION MANAGER --- 
@@ -787,7 +785,7 @@ class RobotSession:
     Chat sessions persist per WebSocket connection to maintain context across tasks.
     """
 
-    MAX_STEPS = 20  # Maximum steps before forced termination
+    MAX_STEPS = 10  # Maximum steps before forced termination
 
     def __init__(self, prompt: str, ws: web.WebSocketResponse):
         self.ws = ws
@@ -897,6 +895,12 @@ class RobotSession:
             if candidate.content is None:
                 print(f"[Session] Response content is None (finish_reason: {finish_reason})")
                 await self._send_ws("error", {"message": f"Empty response from model (reason: {finish_reason})"})
+                self.active = False
+                break
+
+            if candidate.content.parts is None:
+                print(f"[Session] Response content.parts is None (finish_reason: {finish_reason})")
+                await self._send_ws("error", {"message": f"Empty response parts (reason: {finish_reason})"})
                 self.active = False
                 break
 
